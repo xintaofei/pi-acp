@@ -88,8 +88,13 @@ type PendingTurn = {
   lastAssistant: AssistantOutcome | null
   /** pi consumed the prompt without starting a run (disposition `handled`). */
   handled: boolean
-  /** Steers pi took into its queue for this turn. */
-  steers: AcceptedSteer[]
+  /**
+   * This turn's steers pi has not been seen delivering (a request still in
+   * flight included), in the order they were sent.
+   */
+  steers: SentSteer[]
+  /** pi queued at least one of this turn's steers. */
+  queuedSteer: boolean
   /** This turn's steer requests pi has not answered yet. */
   inflightSteers: Set<Promise<unknown>>
 }
@@ -101,8 +106,8 @@ type QueuedTurn = {
   reject: (err: unknown) => void
 }
 
-/** A steer pi took into its queue during the current turn, as it was sent. */
-type AcceptedSteer = { text: string; images: unknown[] }
+/** A steer sent during the current turn, as it was sent. */
+type SentSteer = { text: string; images: unknown[] }
 
 type PermissionResponse = Awaited<ReturnType<AgentSideConnection['requestPermission']>>
 
@@ -522,8 +527,8 @@ export class PiAcpSession {
    *
    * `promptRequired` means pi did not take it, and the client should send it as
    * a normal prompt: no turn is running or it is already ending, or the message
-   * has no text — pi tracks a queued message by its text, so an image-only one
-   * could never be told apart from a delivered one.
+   * has no text — pi lists a queued message by its text, so one without any
+   * would never show as still waiting, and could not be taken back.
    */
   async steer(message: string, images: unknown[] = []): Promise<SteerOutcome> {
     const turn = this.pendingTurn
@@ -532,12 +537,24 @@ export class PiAcpSession {
     const text = expandSlashCommand(message, this.fileCommands)
     if (!text.trim()) return 'promptRequired'
 
-    // Recorded in the chain itself, so a settle that waits on in-flight steers
-    // always sees what pi accepted.
-    const call = this.proc.steer(text, images).then(disposition => {
-      // `handled`: an input handler consumed it — taken, nothing queued.
-      if (disposition !== 'handled') turn.steers.push({ text, images })
-    })
+    // Recorded before it is sent: pi may deliver it before its answer is read.
+    const sent: SentSteer = { text, images }
+    turn.steers.push(sent)
+    const forget = () => {
+      const index = turn.steers.indexOf(sent)
+      if (index !== -1) turn.steers.splice(index, 1)
+    }
+    const call = this.proc.steer(text, images).then(
+      disposition => {
+        // `handled`: an input handler consumed it — taken, nothing queued.
+        if (disposition === 'handled') forget()
+        else turn.queuedSteer = true
+      },
+      (error: unknown) => {
+        forget()
+        throw error
+      }
+    )
     turn.inflightSteers.add(call)
     try {
       await call
@@ -559,25 +576,34 @@ export class PiAcpSession {
   }
 
   /**
-   * pi delivers queued steering in order and drops each message's text from
-   * its queue as it does; drop the same record here, so the turn's records are
-   * always the steers still waiting (two with the same text keep their order,
-   * and each keeps its own images).
+   * pi delivered a user message: if it is one of the current turn's steers,
+   * drop that record, so what is left is what pi still holds. Matched on the
+   * whole content, text and images; two steers that match the same message
+   * are interchangeable, so taking the first keeps every image with its own
+   * text.
    */
-  private forgetDeliveredSteers(before: string[], after: string[]): void {
+  private forgetDeliveredSteer(message: unknown): void {
     const steers = this.pendingTurn?.steers
     if (!steers?.length) return
-    const left = new Map<string, number>()
-    for (const text of after) left.set(text, (left.get(text) ?? 0) + 1)
-    for (const text of before) {
-      const count = left.get(text) ?? 0
-      if (count > 0) {
-        left.set(text, count - 1)
-        continue
-      }
-      const index = steers.findIndex(s => s.text === text)
-      if (index !== -1) steers.splice(index, 1)
-    }
+    const content = (message as { content?: unknown })?.content
+    const parts = Array.isArray(content)
+      ? (content as Array<Record<string, unknown>>)
+      : [{ type: 'text', text: content }]
+    const text = parts
+      .filter(p => p?.type === 'text' && typeof p.text === 'string')
+      .map(p => p.text as string)
+      .join('')
+    const images = parts.filter(p => p?.type === 'image')
+    const index = steers.findIndex(
+      s =>
+        s.text === text &&
+        s.images.length === images.length &&
+        s.images.every((image, i) => {
+          const a = image as Record<string, unknown> | null
+          return a?.data === images[i].data && a?.mimeType === images[i].mimeType
+        })
+    )
+    if (index !== -1) steers.splice(index, 1)
   }
 
   /** Whether pi's queues, as last reported, still hold a message. */
@@ -591,11 +617,13 @@ export class PiAcpSession {
    * deliver them along with the NEXT prompt.
    */
   private async dropLeftoverSteers(turn: PendingTurn): Promise<void> {
-    if (!turn.steers.length && !turn.inflightSteers.size) return
+    if (!turn.queuedSteer && !turn.inflightSteers.size) return
     await this.steersAnswered(turn)
-    if (!turn.steers.length) return
     turn.steers = []
-    if (!this.piQueueHoldsMessages()) return
+    // Whether pi still holds one of OURS cannot be told apart from an
+    // extension's message of the same text; anything pi still holds goes.
+    if (!turn.queuedSteer || !this.piQueueHoldsMessages()) return
+    turn.queuedSteer = false
     try {
       await this.proc.clearQueue()
     } catch {
@@ -718,9 +746,7 @@ export class PiAcpSession {
    * else that was waiting in the same queues. Returns whether it did.
    */
   private async continueWithLeftoverSteers(turn: PendingTurn): Promise<boolean> {
-    if (!turn.steers.length || !this.piQueueHoldsMessages()) return false
-    // The steers still waiting, taken before the clear: pi reports its emptied
-    // queue first, which would otherwise read as their delivery.
+    if (!turn.queuedSteer || !this.piQueueHoldsMessages()) return false
     const waiting = [...turn.steers]
     let cleared: { steering: string[]; followUp: string[] }
     try {
@@ -729,6 +755,7 @@ export class PiAcpSession {
       return false
     }
     turn.steers = []
+    turn.queuedSteer = false
     const texts = [...cleared.steering, ...cleared.followUp].filter(t => t.trim())
     if (!texts.length || this.pendingTurn !== turn) return false
 
@@ -878,6 +905,7 @@ export class PiAcpSession {
       lastAssistant: null,
       handled: false,
       steers: [],
+      queuedSteer: false,
       inflightSteers: new Set()
     }
     this.pendingTurn = turn
@@ -990,6 +1018,12 @@ export class PiAcpSession {
     const type = String((ev as any).type ?? '')
 
     switch (type) {
+      case 'message_start': {
+        // pi hands a queued steer to the model as a user message.
+        if ((ev as any).message?.role === 'user') this.forgetDeliveredSteer((ev as any).message)
+        break
+      }
+
       case 'message_update': {
         const ame = (ev as any).assistantMessageEvent
 
@@ -1033,7 +1067,6 @@ export class PiAcpSession {
           steering: texts((ev as any).steering),
           followUp: texts((ev as any).followUp)
         }
-        this.forgetDeliveredSteers(this.piQueue.steering, next.steering)
         this.piQueue = next
         break
       }
