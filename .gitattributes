@@ -1,0 +1,3 @@
+# LF on every checkout, Windows included: prettier checks for it (endOfLine "lf"), and
+# pi's RPC stream and ACP are both framed on LF.
+* text=auto eol=lf
