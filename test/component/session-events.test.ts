@@ -727,6 +727,8 @@ test('PiAcpSession: cancel flips stopReason to cancelled', async () => {
   })
 
   const p = session.prompt('hello')
+  // pi has answered the prompt: the run is under way when the cancel lands.
+  await new Promise(r => setTimeout(r, 0))
   await session.cancel()
   proc.emit({ type: 'agent_start' })
   proc.emit({ type: 'turn_end' })

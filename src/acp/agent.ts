@@ -312,8 +312,9 @@ export class PiAcpAgent implements ACPAgent {
         }
       },
       // `_session/steering` pushes a message into the running turn through pi's
-      // own steering queue, and answers `promptRequired` (content NOT consumed)
-      // whenever pi did not take it — the idle contract clients opt into.
+      // own steering queue: `injected` once pi has it (it runs within the same
+      // turn), `promptRequired` (content NOT consumed) whenever pi did not take
+      // it — the idle contract clients opt into.
       _meta: {
         steering: { supported: true }
       }
@@ -1200,10 +1201,13 @@ export class PiAcpAgent implements ACPAgent {
 
   /**
    * ACP extension methods. `_session/steering` injects a message into the running
-   * turn: `{outcome: "injected"}` once pi delivered it to the model, or
-   * `{outcome: "promptRequired"}` when pi did not take it (no running turn, or the
-   * turn finished first) — the content is then still the client's to send as a
-   * normal prompt. This adapter never starts a detached turn for a steer.
+   * turn: `{outcome: "injected"}` as soon as pi has queued it — pi delivers it
+   * before its next model call, and one that arrives too late for the run is run
+   * as a continuation of the same turn — or `{outcome: "promptRequired"}` when
+   * pi did not take it (no running turn, the turn is ending, or the message has
+   * no text): the content is then still the client's to send as a normal
+   * prompt. The answer never waits on the run, and this adapter never starts a
+   * detached turn for a steer.
    */
   async extMethod(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
     if (method === '_session/steering') {
@@ -1217,6 +1221,8 @@ export class PiAcpAgent implements ACPAgent {
       if (!message.trim() && images.length === 0) {
         throw RequestError.invalidParams('Expected a non-empty steering prompt')
       }
+      // pi tracks a queued message by its text (see `PiAcpSession.steer`).
+      if (!message.trim()) return { outcome: 'promptRequired', reason: 'noText' }
       const outcome = await session.steer(message, images)
       return outcome === 'injected' ? { outcome } : { outcome, reason: 'turnEnded' }
     }

@@ -348,36 +348,105 @@ test('steering: no running turn means promptRequired, and nothing reaches pi', a
   assert.equal(proc.steers.length, 0)
 })
 
-test('steering: a steer pi delivers into the run is injected; the turn stays open', async () => {
+test('steering: answered injected as soon as pi queues it; pi delivers it within the run', async () => {
   const { proc, session } = harness()
   const turn = session.prompt('work')
   await tick()
   proc.emit({ type: 'agent_start' })
-  const steer = session.steer('also this')
-  await tick()
+  // The client's request does not wait for delivery: it holds up the client's
+  // connection (cancel included) for as long as the current tool runs.
+  assert.equal(await session.steer('also this'), 'injected')
   assert.deepEqual(proc.steers, [{ message: 'also this', images: [] }])
   proc.emit({ type: 'queue_update', steering: ['also this'], followUp: [] })
   // pi takes it off the queue right before delivering it as a user message.
   proc.emit({ type: 'queue_update', steering: [], followUp: [] })
-  assert.equal(await steer, 'injected')
   assert.equal(session.hasActiveTurn, true)
   proc.emit(assistantEnd('stop'))
   proc.emit({ type: 'agent_settled' })
   assert.equal(await turn, 'end_turn')
   assert.equal(proc.clearQueueCount, 0)
+  assert.equal(proc.prompts.length, 1)
 })
 
-test('steering: a steer still queued when the run settles is taken back as promptRequired', async () => {
+test('steering: a steer still queued when the run settles runs as a continuation of the same turn', async () => {
+  const { proc, session } = harness()
+  const turn = session.prompt('work')
+  let settled = false
+  void turn.then(() => (settled = true))
+  await tick()
+  const image = { type: 'image', data: 'AAA', mimeType: 'image/png' }
+  assert.equal(await session.steer('too late', [image]), 'injected')
+  proc.emit({ type: 'queue_update', steering: ['too late'], followUp: [] })
+  proc.clearQueueResult = { steering: ['too late'], followUp: [] }
+  proc.emit(assistantEnd('stop'))
+  proc.emit({ type: 'agent_settled' })
+  await tick()
+  // Taken back from pi's queue (it would ride along with the NEXT prompt) and
+  // sent again, images included, with the turn still open.
+  assert.equal(proc.clearQueueCount, 1)
+  assert.deepEqual(proc.prompts.at(-1), {
+    message: 'too late',
+    attachments: [image]
+  })
+  assert.equal(settled, false)
+  assert.equal(session.hasActiveTurn, true)
+
+  proc.emit({ type: 'agent_start' })
+  proc.emit(assistantEnd('stop'))
+  proc.emit({ type: 'agent_settled' })
+  assert.equal(await turn, 'end_turn')
+  assert.equal(proc.clearQueueCount, 1)
+})
+
+test('steering: settling waits for a steer pi has not answered yet', async () => {
   const { proc, session } = harness()
   const turn = session.prompt('work')
   await tick()
-  const steer = session.steer('too late')
+  proc.holdSteers = true
+  const steer = session.steer('racing the end')
   await tick()
-  proc.emit({ type: 'queue_update', steering: ['too late'], followUp: [] })
   proc.emit(assistantEnd('stop'))
   proc.emit({ type: 'agent_settled' })
-  assert.equal(await steer, 'promptRequired')
-  assert.equal(proc.clearQueueCount, 1)
+  await tick()
+  assert.equal(session.hasActiveTurn, true)
+  // pi queued it only after its run had settled.
+  proc.emit({
+    type: 'queue_update',
+    steering: ['racing the end'],
+    followUp: []
+  })
+  proc.clearQueueResult = { steering: ['racing the end'], followUp: [] }
+  proc.answerSteers()
+  assert.equal(await steer, 'injected')
+  await tick()
+  assert.equal(proc.prompts.at(-1)?.message, 'racing the end')
+  proc.emit(assistantEnd('stop'))
+  proc.emit({ type: 'agent_settled' })
+  assert.equal(await turn, 'end_turn')
+})
+
+test('steering: a steer pi delivered leaves nothing to continue with', async () => {
+  const { proc, session } = harness()
+  const turn = session.prompt('work')
+  await tick()
+  assert.equal(await session.steer('on time'), 'injected')
+  proc.emit({ type: 'queue_update', steering: ['on time'], followUp: [] })
+  proc.emit({ type: 'queue_update', steering: [], followUp: [] })
+  proc.emit(assistantEnd('stop'))
+  proc.emit({ type: 'agent_settled' })
+  assert.equal(await turn, 'end_turn')
+  assert.equal(proc.clearQueueCount, 0)
+  assert.equal(proc.prompts.length, 1)
+})
+
+test('steering: a steer with no text is handed back; pi could not track it', async () => {
+  const { proc, session } = harness()
+  const turn = session.prompt('work')
+  await tick()
+  const image = { type: 'image', data: 'AAA', mimeType: 'image/png' }
+  assert.equal(await session.steer('  ', [image]), 'promptRequired')
+  assert.equal(proc.steers.length, 0)
+  proc.emit({ type: 'agent_settled' })
   assert.equal(await turn, 'end_turn')
 })
 
@@ -392,30 +461,80 @@ test('steering: a steer an input handler consumed counts as injected', async () 
   assert.equal(proc.clearQueueCount, 0)
 })
 
-test('steering: cancel takes queued steers back BEFORE aborting (pi would run them)', async () => {
+test('steering: cancel takes queued steers back BEFORE aborting (pi would run them next time)', async () => {
   const { proc, session } = harness()
   const turn = session.prompt('work')
   await tick()
-  const steer = session.steer('queued')
-  await tick()
+  assert.equal(await session.steer('queued'), 'injected')
   proc.emit({ type: 'queue_update', steering: ['queued'], followUp: [] })
   await session.cancel()
-  assert.equal(await steer, 'promptRequired')
   assert.deepEqual(proc.controlCalls, ['clearQueue', 'abort'])
+  // Ending, so a steer now is the client's to keep.
+  assert.equal(await session.steer('late'), 'promptRequired')
   proc.emit(assistantEnd('aborted'))
+  proc.emit({ type: 'agent_settled' })
+  assert.equal(await turn, 'cancelled')
+  assert.equal(proc.prompts.length, 1)
+})
+
+test("steering: cancel leaves pi's queue alone when every steer was delivered", async () => {
+  const { proc, session } = harness()
+  const turn = session.prompt('work')
+  await tick()
+  assert.equal(await session.steer('delivered'), 'injected')
+  proc.emit({ type: 'queue_update', steering: ['delivered'], followUp: [] })
+  proc.emit({ type: 'queue_update', steering: [], followUp: [] })
+  await session.cancel()
+  assert.deepEqual(proc.controlCalls, ['abort'])
   proc.emit({ type: 'agent_settled' })
   assert.equal(await turn, 'cancelled')
 })
 
-test('steering: pi exiting hands every pending steer back', async () => {
+test('steering: a steer pi never answered before it exited is handed back', async () => {
   const { proc, session } = harness()
   const turn = session.prompt('work')
   await tick()
+  proc.holdSteers = true
   const steer = session.steer('lost')
   await tick()
   proc.exit({ code: null, signal: 'SIGKILL' })
   assert.equal(await steer, 'promptRequired')
   await assert.rejects(turn, /pi process exited/)
+})
+
+test('a refused prompt takes back the steers pi took for it, and starts the next prompt', async () => {
+  const { proc, session } = harness()
+  let release!: () => void
+  proc.promptGate = new Promise<void>(r => (release = r))
+  proc.promptError = new Error('pi prompt failed: No model selected')
+  const first = session.prompt('first')
+  await tick()
+  assert.equal(await session.steer('for first'), 'injected')
+  proc.emit({ type: 'queue_update', steering: ['for first'], followUp: [] })
+  const second = assert.rejects(session.prompt('second'), /No model selected/)
+  release()
+  await assert.rejects(first, /No model selected/)
+  await tick()
+  assert.equal(proc.clearQueueCount, 1)
+  // The prompt queued behind it is not stranded: it gets pi's own answer.
+  assert.equal(proc.prompts.at(-1)?.message, 'second')
+  await second
+})
+
+test('cancelled while pi was still preparing the prompt: the run is aborted once it starts', async () => {
+  const { proc, session } = harness()
+  let release!: () => void
+  proc.promptGate = new Promise<void>(r => (release = r))
+  const turn = session.prompt('work')
+  await tick()
+  await session.cancel()
+  assert.equal(proc.abortCount, 1)
+  release()
+  await tick()
+  assert.equal(proc.abortCount, 2)
+  proc.emit(assistantEnd('aborted'))
+  proc.emit({ type: 'agent_settled' })
+  assert.equal(await turn, 'cancelled')
 })
 
 test('agent: initialize advertises steering and HTTP MCP; _session/steering routes to the session', async () => {

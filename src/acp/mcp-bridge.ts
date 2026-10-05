@@ -226,7 +226,13 @@ export class McpBridgeLaunch {
     const configPath = join(dir, 'bridge.json')
     const statusPath = join(dir, 'status.json')
     const config: BridgeConfig = { version: 1, servers: bridged, statusPath }
-    writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 })
+    try {
+      writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 })
+    } catch (error) {
+      // Never leave a partial copy of the servers' credentials behind.
+      rmSync(dir, { recursive: true, force: true })
+      throw error
+    }
     return new McpBridgeLaunch(
       dir,
       statusPath,

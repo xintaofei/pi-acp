@@ -23,7 +23,8 @@ function makeFakeChild(): FakeChild {
       written.push(String(line))
       cb?.(null)
       return true
-    }
+    },
+    on: () => child.stdin
   }
   return { child, stdout, written }
 }

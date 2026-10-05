@@ -46,10 +46,26 @@ export class FakePiRpcProcess {
   promptDisposition: PromptDisposition | undefined = 'started'
   /** When set, `prompt()` rejects with this error. */
   promptError: unknown = null
+  /** When set, `prompt()` answers only once this settles (pi still preparing). */
+  promptGate: Promise<void> | null = null
 
   readonly steers: Array<{ message: string; images: unknown[] }> = []
   steerDisposition: QueuedInputDisposition | undefined = 'queued'
+  /**
+   * When true, `steer()` stays unanswered until `answerSteers()` (or the child
+   * exits, which fails it like the real process layer does).
+   */
+  holdSteers = false
+  private heldSteers: Array<{
+    resolve: (d: QueuedInputDisposition | undefined) => void
+    reject: (e: unknown) => void
+  }> = []
   clearQueueCount = 0
+  /** What the next `clearQueue()` reports it removed. */
+  clearQueueResult: { steering: string[]; followUp: string[] } = {
+    steering: [],
+    followUp: []
+  }
   /** Call order of `clearQueue` / `abort`, to check cancel sequencing. */
   readonly controlCalls: string[] = []
 
@@ -78,24 +94,36 @@ export class FakePiRpcProcess {
       signal: exit.signal ?? null,
       stderrTail: exit.stderrTail ?? ''
     }
+    for (const h of this.heldSteers.splice(0)) h.reject(new Error('pi process exited'))
     for (const h of this.exitHandlers) h(info)
+  }
+
+  /** Answer every held `steer()` with `steerDisposition`. */
+  answerSteers() {
+    for (const h of this.heldSteers.splice(0)) h.resolve(this.steerDisposition)
   }
 
   async prompt(message: string, attachments: unknown[] = []): Promise<PromptDisposition | undefined> {
     this.prompts.push({ message, attachments })
+    if (this.promptGate) await this.promptGate
     if (this.promptError) throw this.promptError
     return this.promptDisposition
   }
 
   async steer(message: string, images: unknown[] = []): Promise<QueuedInputDisposition | undefined> {
     this.steers.push({ message, images })
+    if (this.holdSteers) return new Promise((resolve, reject) => this.heldSteers.push({ resolve, reject }))
     return this.steerDisposition
   }
 
   async clearQueue(): Promise<{ steering: string[]; followUp: string[] }> {
     this.clearQueueCount += 1
     this.controlCalls.push('clearQueue')
-    return { steering: [], followUp: [] }
+    const cleared = this.clearQueueResult
+    this.clearQueueResult = { steering: [], followUp: [] }
+    // pi reports its emptied queues before it answers.
+    this.emit({ type: 'queue_update', steering: [], followUp: [] })
+    return cleared
   }
 
   async abort(): Promise<void> {

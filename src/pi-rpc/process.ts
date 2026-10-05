@@ -98,6 +98,13 @@ export const SESSION_STATS_TIMEOUT_MS = 1_000
 const STDERR_TAIL_BYTES = 4 * 1024
 
 /**
+ * How long an exit waits for pi's stdout/stderr to close before it is reported.
+ * A process that exited can still have its last response and its dying words
+ * in the pipes; a grandchild that inherited them must not hide the exit.
+ */
+const EXIT_DRAIN_MS = 250
+
+/**
  * Shape of `stats.contextUsage` in pi's `get_session_stats` response.
  * `tokens` is null while pi has no trustworthy token count (e.g. right after compaction).
  */
@@ -168,7 +175,8 @@ export class PiRpcProcess {
       this.stderrTail = (this.stderrTail + chunk.toString('utf8')).slice(-STDERR_TAIL_BYTES)
     })
 
-    child.on('exit', (code, signal) => {
+    const reportExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+      if (this.exitInfo) return
       this.exitInfo = { code, signal, stderrTail: this.stderrTail }
       const err = new Error(`pi process exited (code=${code}, signal=${signal})`)
       for (const [, p] of this.pending) p.reject(err)
@@ -180,6 +188,18 @@ export class PiRpcProcess {
           // ignore
         }
       }
+    }
+    // A write to a pi that exited fails with EPIPE: `writeLine` reports it to
+    // its request, and an unhandled stream error would take this process down.
+    child.stdin.on('error', () => {})
+
+    child.on('exit', (code, signal) => {
+      // Let the pipes drain first: `close` comes once they did.
+      const timer = setTimeout(() => reportExit(code, signal), EXIT_DRAIN_MS)
+      child.once('close', () => {
+        clearTimeout(timer)
+        reportExit(code, signal)
+      })
     })
 
     child.on('error', err => {

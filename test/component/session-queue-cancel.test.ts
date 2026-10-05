@@ -22,6 +22,8 @@ test('PiAcpSession: cancel clears queued prompts', async () => {
 
   // first started, second+third queued
   assert.equal(proc.prompts.length, 1)
+  // pi has answered the first prompt: its run is under way when the cancel lands.
+  await new Promise(r => setTimeout(r, 0))
 
   await session.cancel()
 
