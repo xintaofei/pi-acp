@@ -24,7 +24,8 @@ import {
   type DeleteSessionResponse
 } from '@agentclientprotocol/sdk'
 import { getAuthMethods } from './auth.js'
-import { SessionManager, type PiAcpSession } from './session.js'
+import { McpBridgeLaunch, piTooOldMessage, type McpDeliveryReport } from './mcp-bridge.js'
+import { SessionManager, turnError, type PiAcpSession } from './session.js'
 import { SessionStore } from './session-store.js'
 import { PiRpcProcess } from '../pi-rpc/process.js'
 import { listPiSessions, findPiSession } from './pi-sessions.js'
@@ -42,13 +43,13 @@ import {
 } from './translate/bash.js'
 import { promptToPiMessage } from './translate/prompt.js'
 import { loadSlashCommands, parseCommandArgs, toAvailableCommands } from './slash-commands.js'
-import { getAgentDir, getEnableSkillCommands, getQuietStartup } from './pi-settings.js'
+import { getEnableSkillCommands } from './pi-settings.js'
 import { toAvailableCommandsFromPiGetCommands } from './pi-commands.js'
 import { maybeAuthRequiredError } from './auth-required.js'
 import { isAbsolute } from 'node:path'
-import { existsSync, readFileSync, realpathSync, readdirSync, statSync, unlinkSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync, unlinkSync } from 'node:fs'
 import type { AvailableCommand } from '@agentclientprotocol/sdk'
-import { join, dirname, basename } from 'node:path'
+import { join, dirname } from 'node:path'
 import { spawnSync } from 'node:child_process'
 
 type AdvertisedModel = {
@@ -117,7 +118,27 @@ function mergeCommands(a: AvailableCommand[], b: AvailableCommand[]): AvailableC
 }
 import { fileURLToPath } from 'node:url'
 
+declare const __CODEG_PI_ACP_VERSION__: string | undefined
+
 const pkg = readNearestPackageJson(import.meta.url)
+
+/** The adapter's own name and version, as `initialize` reports them. */
+export const ADAPTER_NAME = 'codeg-pi-acp'
+export const ADAPTER_VERSION: string =
+  typeof __CODEG_PI_ACP_VERSION__ === 'string' ? __CODEG_PI_ACP_VERSION__ : (pkg.version ?? '0.0.0')
+
+/** `_meta.piAcp` of a session/new or session/load response. */
+function sessionMeta(mcp: McpDeliveryReport | null | undefined): Record<string, unknown> {
+  return {
+    piAcp: {
+      // Kept for clients that look for it; the adapter no longer synthesizes a
+      // startup banner (it cost a `pi --version` and an `npm view` per session).
+      startupInfo: null,
+      // How the session's MCP servers reached pi. `null` when none were given.
+      mcp: mcp ?? null
+    }
+  }
+}
 
 export class PiAcpAgent implements ACPAgent {
   private readonly conn: AgentSideConnection
@@ -195,19 +216,29 @@ export class PiAcpAgent implements ACPAgent {
 
       const cwd = opts?.cwd ?? stored.cwd
 
+      const bridge = McpBridgeLaunch.prepare(opts?.mcpServers)
       let proc: PiRpcProcess
       try {
         proc = await PiRpcProcess.spawn({
           cwd,
           sessionPath: stored.sessionFile,
-          piCommand: process.env.PI_ACP_PI_COMMAND
+          piCommand: process.env.PI_ACP_PI_COMMAND,
+          extensions: bridge.extensions,
+          env: bridge.env
         })
       } catch (e: any) {
+        bridge.cleanup()
         if (e?.name === 'PiRpcSpawnError') {
           throw RequestError.internalError({ code: e?.code }, String(e?.message ?? e))
         }
         throw e
       }
+      const bridged = bridge.collect()
+      if (bridged.piSupportsMcp === false) {
+        proc.dispose()
+        throw turnError(piTooOldMessage())
+      }
+      const mcpDelivery = bridged.report
 
       const fileCommands = loadSlashCommands(cwd)
       const session = this.sessions.getOrCreate(sessionId, {
@@ -215,7 +246,8 @@ export class PiAcpAgent implements ACPAgent {
         mcpServers: opts?.mcpServers ?? [],
         conn: this.conn,
         proc,
-        fileCommands
+        fileCommands,
+        mcpDelivery
       })
 
       this.lastSessionCwd = cwd
@@ -241,9 +273,9 @@ export class PiAcpAgent implements ACPAgent {
     return {
       protocolVersion: requested === supportedVersion ? requested : supportedVersion,
       agentInfo: {
-        name: pkg.name ?? 'pi-acp',
-        title: 'pi ACP adapter',
-        version: pkg.version ?? '0.0.0'
+        name: ADAPTER_NAME,
+        title: 'pi ACP adapter (codeg)',
+        version: ADAPTER_VERSION
       },
       // Zed currently uses ClientCapabilities._meta["terminal-auth"] to decide whether to show
       // the "Authenticate" banner/button. If not supported, we still return the method for the registry.
@@ -252,7 +284,9 @@ export class PiAcpAgent implements ACPAgent {
       }),
       agentCapabilities: {
         loadSession: true,
-        mcpCapabilities: { http: false, sse: false },
+        // pi 0.99+ speaks MCP natively over stdio and streamable HTTP; the
+        // legacy SSE transport is rejected by pi itself.
+        mcpCapabilities: { http: true, sse: false },
         promptCapabilities: {
           image: true,
           audio: false,
@@ -264,6 +298,12 @@ export class PiAcpAgent implements ACPAgent {
           list: {},
           delete: {}
         }
+      },
+      // `_session/steering` pushes a message into the running turn through pi's
+      // own steering queue, and answers `promptRequired` (content NOT consumed)
+      // whenever pi did not take it — the idle contract clients opt into.
+      _meta: {
+        steering: { supported: true }
       }
     }
   }
@@ -278,7 +318,7 @@ export class PiAcpAgent implements ACPAgent {
     const fileCommands = loadSlashCommands(params.cwd)
     const enableSkillCommands = getEnableSkillCommands(params.cwd)
 
-    // Pi doesn't support mcpServers, but we accept and store.
+    // MCP servers reach pi through the bridge extension (see mcp-bridge.ts).
     const session = await this.sessions.create({
       cwd: params.cwd,
       mcpServers: params.mcpServers,
@@ -355,29 +395,12 @@ export class PiAcpAgent implements ACPAgent {
     }
     const { configOptions, models, modes } = configuration
 
-    const quietStartup = getQuietStartup(params.cwd)
-    const updateNotice = buildUpdateNotice()
-
-    // If quietStartup is enabled, suppress the full "startup info" prelude, but still surface
-    // the "New version available" notice (if any) since it's high-signal and actionable.
-    const preludeText = quietStartup
-      ? updateNotice
-        ? updateNotice + '\n'
-        : ''
-      : buildStartupInfo({
-          cwd: params.cwd,
-          fileCommands,
-          updateNotice
-        })
-
-    if (preludeText)
-      session.setStartupInfo(preludeText)
-
-      // Policy: within a single ACP connection (one client window), keep only one live pi subprocess.
-      // This avoids leaking subprocesses when clients start new sessions but don't explicitly close old ones.
-      // It does NOT affect other client windows because they run in separate agent processes.
-      //
-      // (Tests sometimes stub out `this.sessions`, so guard the call.)
+    // Policy: within a single ACP connection (one client window), keep only one live pi subprocess.
+    // This avoids leaking subprocesses when clients start new sessions but don't explicitly close old ones.
+    // It does NOT affect other client windows because they run in separate agent processes.
+    // A closed session's in-flight turn ends `cancelled` (see SessionManager.close).
+    //
+    // (Tests sometimes stub out `this.sessions`, so guard the call.)
     ;(this.sessions as any).closeAllExcept?.(session.sessionId)
 
     const response = {
@@ -385,16 +408,8 @@ export class PiAcpAgent implements ACPAgent {
       configOptions,
       models,
       modes,
-      _meta: {
-        piAcp: {
-          startupInfo: preludeText || null
-        }
-      }
+      _meta: sessionMeta(session.mcpDelivery)
     }
-
-    // Try to send it immediately after session/new returns; if the client ignores it,
-    // it will still be emitted as the first chunk of the first prompt.
-    if (preludeText) setTimeout(() => session.sendStartupInfoIfPending(), 0)
 
     // Advertise slash commands (ACP: available_commands_update)
     // Important: some clients (e.g. Zed) will ignore notifications for an unknown sessionId.
@@ -890,12 +905,8 @@ export class PiAcpAgent implements ACPAgent {
       }
     }
 
-    const result = await session.prompt(message, images)
-
-    // ACP StopReason does not include "error"; if pi fails we map to end_turn for now,
-    // unless we know this was a cancellation.
-    const stopReason: StopReason =
-      result === 'error' ? (session.wasCancelRequested() ? 'cancelled' : 'end_turn') : result
+    // A failed turn rejects (with pi's own error text); see PiAcpSession.resolveTurn.
+    const stopReason: StopReason = await session.prompt(message, images)
 
     return { stopReason }
   }
@@ -1080,11 +1091,7 @@ export class PiAcpAgent implements ACPAgent {
       configOptions,
       models,
       modes,
-      _meta: {
-        piAcp: {
-          startupInfo: null
-        }
-      }
+      _meta: sessionMeta(session.mcpDelivery)
     }
 
     // Advertise slash commands after the response so the client knows the session exists.
@@ -1148,6 +1155,31 @@ export class PiAcpAgent implements ACPAgent {
     this.store.delete(params.sessionId)
 
     return {}
+  }
+
+  /**
+   * ACP extension methods. `_session/steering` injects a message into the running
+   * turn: `{outcome: "injected"}` once pi delivered it to the model, or
+   * `{outcome: "promptRequired"}` when pi did not take it (no running turn, or the
+   * turn finished first) — the content is then still the client's to send as a
+   * normal prompt. This adapter never starts a detached turn for a steer.
+   */
+  async extMethod(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+    if (method === '_session/steering') {
+      const sessionId = typeof params.sessionId === 'string' ? params.sessionId : ''
+      const session = this.sessions.maybeGet(sessionId)
+      if (!session || !session.hasActiveTurn) {
+        return { outcome: 'promptRequired', reason: 'noRunningTurn' }
+      }
+      const blocks = Array.isArray(params.prompt) ? (params.prompt as Parameters<typeof promptToPiMessage>[0]) : []
+      const { message, images } = promptToPiMessage(blocks)
+      if (!message.trim() && images.length === 0) {
+        throw RequestError.invalidParams('Expected a non-empty steering prompt')
+      }
+      const outcome = await session.steer(message, images)
+      return outcome === 'injected' ? { outcome } : { outcome, reason: 'turnEnded' }
+    }
+    throw RequestError.methodNotFound(method)
   }
 
   async unstable_setSessionModel(params: { sessionId: string; modelId: string }): Promise<void> {
@@ -1426,216 +1458,6 @@ async function setSessionModel(proc: PiRpcProcess, requestedModelId: string): Pr
   }
 
   await proc.setModel(provider, modelId)
-}
-
-function isSemver(v: string): boolean {
-  return /^\d+\.\d+\.\d+(?:[-+].+)?$/.test(v)
-}
-
-function compareSemver(a: string, b: string): number {
-  // Very small comparator for x.y.z (ignores pre-release/build beyond making them "not greater" unless base differs)
-  const pa = a
-    .split(/[.-]/)
-    .slice(0, 3)
-    .map(n => Number(n))
-  const pb = b
-    .split(/[.-]/)
-    .slice(0, 3)
-    .map(n => Number(n))
-  for (let i = 0; i < 3; i++) {
-    const da = pa[i] ?? 0
-    const db = pb[i] ?? 0
-    if (da > db) return 1
-    if (da < db) return -1
-  }
-  return 0
-}
-
-function buildUpdateNotice(): string | null {
-  // Best-effort update check against npm registry.
-  // Important: keep it fast to not slow down session/new.
-  try {
-    const piVersion = spawnSync('pi', ['--version'], { encoding: 'utf-8' })
-    const installed = (String(piVersion.stdout ?? '').trim() || String(piVersion.stderr ?? '').trim()).replace(
-      /^v/i,
-      ''
-    )
-
-    if (!installed || !isSemver(installed)) return null
-
-    const latestRes = spawnSync('npm', ['view', '@earendil-works/pi-coding-agent', 'version'], {
-      encoding: 'utf-8',
-      timeout: 800
-    })
-    const latest = String(latestRes.stdout ?? '')
-      .trim()
-      .replace(/^v/i, '')
-
-    if (!latest || !isSemver(latest)) return null
-    if (compareSemver(latest, installed) <= 0) return null
-
-    return `New version available: v${latest} (installed v${installed}). Run: \`npm i -g @earendil-works/pi-coding-agent\``
-  } catch {
-    return null
-  }
-}
-
-function buildStartupInfo(opts: {
-  cwd: string
-  fileCommands: ReturnType<typeof loadSlashCommands>
-  updateNotice: string | null
-}): string {
-  void opts.fileCommands
-
-  const md: string[] = []
-
-  // pi version header
-  try {
-    const piVersion = spawnSync('pi', ['--version'], { encoding: 'utf-8' })
-    const installed = (String(piVersion.stdout ?? '').trim() || String(piVersion.stderr ?? '').trim()).replace(
-      /^v/i,
-      ''
-    )
-    if (installed) {
-      md.push(`pi v${installed}`)
-      md.push('---')
-      md.push('')
-    }
-  } catch {
-    // ignore
-  }
-
-  const addSection = (title: string, items: string[]) => {
-    const cleaned = items.map(s => s.trim()).filter(Boolean)
-    if (!cleaned.length) return
-
-    md.push(`## ${title}`)
-    for (const item of cleaned) md.push(`- ${item}`)
-    md.push('')
-  }
-
-  // Context
-  const contextItems: string[] = []
-  const contextPath = join(opts.cwd, 'AGENTS.md')
-  if (existsSync(contextPath)) contextItems.push(contextPath)
-  addSection('Context', contextItems)
-
-  // Skills
-  const skillsItems: string[] = []
-
-  const pushSkillFromRoot = (root: string) => {
-    try {
-      // Direct .md files in root
-      for (const e of readdirSync(root)) {
-        const p = join(root, e)
-        try {
-          const st = statSync(p)
-          if (st.isFile() && e.toLowerCase().endsWith('.md')) {
-            skillsItems.push(p)
-          }
-        } catch {
-          // ignore
-        }
-      }
-
-      // Recursive SKILL.md under subdirectories
-      const stack: string[] = [root]
-      while (stack.length) {
-        const dir = stack.pop()!
-        let entries: string[] = []
-        try {
-          entries = readdirSync(dir)
-        } catch {
-          continue
-        }
-
-        for (const name of entries) {
-          // Skip obvious noise
-          if (name === 'node_modules' || name === '.git') continue
-          const p = join(dir, name)
-          let st
-          try {
-            st = statSync(p)
-          } catch {
-            continue
-          }
-          if (st.isDirectory()) {
-            stack.push(p)
-          } else if (st.isFile() && name === 'SKILL.md') {
-            skillsItems.push(p)
-          }
-        }
-      }
-    } catch {
-      // ignore
-    }
-  }
-
-  // Global skills
-  // Use getAgentDir() so this respects PI_CODING_AGENT_DIR overrides.
-  const globalSkillsDir = join(getAgentDir(), 'skills')
-  pushSkillFromRoot(globalSkillsDir)
-
-  // Also support ~/.agents/skills (pi skill discovery)
-  const legacyAgentsSkillsDir = join(process.env.HOME ?? '', '.agents', 'skills')
-  pushSkillFromRoot(legacyAgentsSkillsDir)
-
-  // Project skills (.pi/skills)
-  const projectSkillsDir = join(opts.cwd, '.pi', 'skills')
-  pushSkillFromRoot(projectSkillsDir)
-
-  addSection('Skills', skillsItems)
-
-  // Prompts
-  const promptsItems: string[] = []
-  const promptsDir = join(process.env.HOME ?? '', '.pi', 'agent', 'prompts')
-  try {
-    const prompts = readdirSync(promptsDir).filter(f => f.endsWith('.md'))
-    for (const f of prompts) promptsItems.push(`/${basename(f, '.md')}`)
-  } catch {
-    // ignore
-  }
-  addSection('Prompts', promptsItems)
-
-  // Extensions
-  const extItems: string[] = []
-  const extDir = join(process.env.HOME ?? '', '.pi', 'agent', 'extensions')
-  try {
-    const exts = readdirSync(extDir).filter(f => f.endsWith('.ts') || f.endsWith('.js'))
-    for (const f of exts) extItems.push(join(extDir, f))
-  } catch {
-    // ignore
-  }
-
-  // Also show npm packages from pi settings (global + project)
-  const settingsPaths = [join(getAgentDir(), 'settings.json'), join(opts.cwd, '.pi', 'settings.json')]
-  for (const settingsPath of settingsPaths) {
-    try {
-      const settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) as any
-      const pkgs: string[] = Array.isArray(settings?.packages) ? settings.packages : []
-      for (const pkg of pkgs) {
-        const s = String(pkg)
-        if (s.startsWith('npm:')) {
-          extItems.push(`${s}\n  - index.ts`)
-        } else {
-          extItems.push(s)
-        }
-      }
-    } catch {
-      // ignore
-    }
-  }
-
-  addSection('Extensions', extItems)
-
-  if (opts.updateNotice) {
-    md.push('---')
-    md.push(opts.updateNotice)
-    md.push('')
-  }
-
-  // Do NOT include themes (per request).
-  return md.join('\n').trim() + '\n'
 }
 
 function readNearestPackageJson(metaUrl: string): {

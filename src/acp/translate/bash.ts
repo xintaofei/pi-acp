@@ -20,8 +20,14 @@ type BashResultRecord = {
   code?: unknown
 }
 
+/**
+ * Shell tools whose output pi streams as a growing transcript: pi's `bash`, and
+ * `powershell` (pi 0.99+, same result contract). Both are reported through the
+ * display-only terminal `_meta` channel.
+ */
 export function isBashTool(toolName: string): boolean {
-  return toolName.toLowerCase() === 'bash'
+  const name = toolName.toLowerCase()
+  return name === 'bash' || name === 'powershell'
 }
 
 export function bashCommand(value: unknown): string | undefined {

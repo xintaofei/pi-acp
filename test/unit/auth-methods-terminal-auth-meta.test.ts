@@ -11,7 +11,8 @@ test('getAuthMethods: includes Zed terminal-auth metadata when enabled', () => {
   assert.ok(m._meta)
   assert.ok(m._meta['terminal-auth'])
   assert.ok(typeof m._meta['terminal-auth'].command === 'string')
-  assert.deepEqual(m._meta['terminal-auth'].args, ['--terminal-login'])
+  // `[script, '--terminal-login']` when launched as `node <script>.js`, the bare flag otherwise.
+  assert.equal(m._meta['terminal-auth'].args.at(-1), '--terminal-login')
   assert.equal(m._meta['terminal-auth'].label, 'Launch pi')
 })
 

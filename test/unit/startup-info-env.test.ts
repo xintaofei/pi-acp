@@ -10,7 +10,7 @@ class FakeSessions {
   }
 }
 
-test('PiAcpAgent: quietStartup=true disables startup info generation/emission', async () => {
+test('PiAcpAgent: session/new never synthesizes a startup banner (quietStartup or not)', async () => {
   const prevAgentDir = process.env.PI_CODING_AGENT_DIR
 
   // Force quietStartup in pi settings by pointing PI_CODING_AGENT_DIR at a temp dir.
@@ -63,19 +63,15 @@ test('PiAcpAgent: quietStartup=true disables startup info generation/emission', 
 
     const res = await agent.newSession({ cwd: process.cwd(), mcpServers: [] } as any)
 
-    const startupInfo = res?._meta?.piAcp?.startupInfo ?? null
+    const piAcp = (res?._meta as { piAcp?: { startupInfo?: unknown; mcp?: unknown } } | undefined)?.piAcp
 
-    // When quietStartup=true the full prelude is suppressed. However, an update notice
-    // (if one exists) is still surfaced because it's high-signal and actionable.
-    // The test must tolerate both cases since the live npm check may or may not find an update.
-    if (startupInfo) {
-      assert.match(startupInfo, /New version available/)
-      assert.equal(setStartupInfoCalled, true)
-      assert.equal(timeouts.length, 2)
-    } else {
-      assert.equal(setStartupInfoCalled, false)
-      assert.equal(timeouts.length, 1)
-    }
+    // The banner (and the `pi --version` + `npm view` it ran per session) is gone:
+    // the key stays, always null, and nothing is scheduled except the
+    // available-commands publication.
+    assert.equal(piAcp?.startupInfo, null)
+    assert.equal(piAcp?.mcp, null)
+    assert.equal(setStartupInfoCalled, false)
+    assert.equal(timeouts.length, 1)
   } finally {
     ;(globalThis as any).setTimeout = realSetTimeout
     if (prevAgentDir == null) delete process.env.PI_CODING_AGENT_DIR

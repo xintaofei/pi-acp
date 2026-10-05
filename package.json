@@ -1,40 +1,43 @@
 {
-  "name": "pi-acp",
-  "version": "0.0.34",
-  "description": "ACP adapter for pi coding agent",
+  "name": "codeg-pi-acp",
+  "version": "0.1.0",
+  "description": "Agent Client Protocol adapter for the pi coding agent, maintained for codeg (a fork of pi-acp)",
   "license": "MIT",
-  "author": "Sergii Kozak <svkozak@gmail.com>",
+  "author": "xintaofei",
+  "contributors": [
+    "Sergii Kozak <svkozak@gmail.com>"
+  ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/svkozak/pi-acp.git"
+    "url": "git+https://github.com/xintaofei/pi-acp.git"
   },
   "publishConfig": {
-    "access": "public",
-    "provenance": true
+    "registry": "https://registry.npmjs.org/"
   },
   "bugs": {
-    "url": "https://github.com/svkozak/pi-acp/issues"
+    "url": "https://github.com/xintaofei/pi-acp/issues"
   },
-  "homepage": "https://github.com/svkozak/pi-acp#readme",
+  "homepage": "https://github.com/xintaofei/pi-acp#readme",
   "keywords": [
     "acp",
     "agent-client-protocol",
     "pi-coding-agent",
-    "adapter"
+    "adapter",
+    "codeg"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22.19.0"
   },
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "pi-acp": "dist/index.js"
+    "codeg-pi-acp": "dist/index.js"
   },
   "files": [
     "dist"
   ],
   "scripts": {
-    "dev": "tsx src/index.ts",
+    "dev": "tsup --silent && node dist/index.js",
     "build": "tsup",
     "start": "node dist/index.js",
     "format": "prettier . --write",
@@ -46,9 +49,9 @@
     "prepublishOnly": "npm run test && npm run build"
   },
   "dependencies": {
-    "@agentclientprotocol/sdk": "^0.26.0",
-    "cross-spawn": "^7.0.6",
-    "zod": "^3.25.0"
+    "@agentclientprotocol/sdk": "0.26.0",
+    "cross-spawn": "7.0.6",
+    "zod": "3.25.76"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",

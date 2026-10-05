@@ -1,4 +1,11 @@
-export function toolResultToText(result: unknown): string {
+/**
+ * The readable text of a pi tool result, or `''` when it has none.
+ *
+ * pi tool results look like `{ content: [{type:"text", text}], details: {...} }`.
+ * The edit tool keeps the full unified diff in `details.diff`, and bash-like tools
+ * may report stdout/stderr in `details` rather than content blocks.
+ */
+export function toolResultText(result: unknown): string {
   if (!result) return ''
 
   const details = (result as any)?.details
@@ -9,7 +16,6 @@ export function toolResultToText(result: unknown): string {
     return diff
   }
 
-  // pi tool results generally look like: { content: [{type:"text", text:"..."}], details: {...} }
   const content = (result as any).content
   if (Array.isArray(content)) {
     const texts = content
@@ -42,6 +48,18 @@ export function toolResultToText(result: unknown): string {
     if (typeof exitCode === 'number') parts.push(`exit code: ${exitCode}`)
     return parts.join('\n\n').trimEnd()
   }
+
+  return ''
+}
+
+/**
+ * `toolResultText`, falling back to the result's JSON so a FINAL result that
+ * carries no text (structured-only output) is still shown rather than lost.
+ */
+export function toolResultToText(result: unknown): string {
+  if (!result) return ''
+  const text = toolResultText(result)
+  if (text) return text
 
   try {
     return JSON.stringify(result, null, 2)

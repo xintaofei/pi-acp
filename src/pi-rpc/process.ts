@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import * as readline from 'node:readline'
 import crossSpawn from 'cross-spawn'
 import { getPiCommand, shouldUseShellForPiCommand } from './command.js'
+import { JsonlSplitter } from './jsonl.js'
 
 export class PiRpcSpawnError extends Error {
   /** Underlying spawn error code, e.g. ENOENT, EACCES */
@@ -28,9 +28,13 @@ function stripAnsi(s: string): string {
   return s.replace(ANSI_ESCAPE_REGEX, '')
 }
 
+type PiImagePayload = { type: 'image'; mimeType: string; data: string }
+
 type PiRpcCommand =
   | { type: 'prompt'; id?: string; message: string; images?: unknown[] }
+  | { type: 'steer'; id?: string; message: string; images?: unknown[] }
   | { type: 'abort'; id?: string }
+  | { type: 'clear_queue'; id?: string }
   | { type: 'get_state'; id?: string }
   // Model
   | { type: 'get_available_models'; id?: string }
@@ -70,8 +74,28 @@ type PiExtensionUiResponse =
 
 export type PiRpcEvent = Record<string, unknown>
 
+/**
+ * What pi did with a submitted prompt (pi 0.99+). `handled` means an extension
+ * command or input handler consumed it and NO run starts, so no `agent_settled`
+ * will follow. `undefined` means an older pi that does not report it.
+ */
+export type PromptDisposition = 'started' | 'queued' | 'handled'
+
+/** What pi did with a steering message (pi 0.99+). */
+export type QueuedInputDisposition = 'queued' | 'handled'
+
+/** Why the pi child is gone, once it is. */
+export type PiExit = {
+  code: number | null
+  signal: NodeJS.Signals | null
+  stderrTail: string
+}
+
 /** Maximum wait for an auxiliary context-usage update. */
 export const SESSION_STATS_TIMEOUT_MS = 1_000
+
+/** How much of pi's stderr to keep for an exit report. */
+const STDERR_TAIL_BYTES = 4 * 1024
 
 /**
  * Shape of `stats.contextUsage` in pi's `get_session_stats` response.
@@ -97,52 +121,65 @@ export type PiSessionStats = {
   contextUsage?: PiContextUsage | null
 }
 
-type SpawnParams = {
+export type SpawnParams = {
   cwd: string
   /** Optional override for `pi` executable name/path */
   piCommand?: string
   /** If set, pi will persist the session to this exact file (via `--session <path>`). */
   sessionPath?: string
+  /** Extensions to load explicitly (`-e <path>`), e.g. the codeg bridge. */
+  extensions?: string[]
+  /** Extra environment for the pi child only. */
+  env?: Record<string, string>
+}
+
+function dispositionOf<T extends string>(data: unknown, allowed: readonly T[]): T | undefined {
+  const value = data && typeof data === 'object' ? (data as { disposition?: unknown }).disposition : undefined
+  return typeof value === 'string' && (allowed as readonly string[]).includes(value) ? (value as T) : undefined
 }
 
 export class PiRpcProcess {
   private readonly child: ChildProcessWithoutNullStreams
   private readonly pending = new Map<string, { resolve: (v: PiRpcResponse) => void; reject: (e: unknown) => void }>()
   private eventHandlers: Array<(ev: PiRpcEvent) => void> = []
+  private exitHandlers: Array<(exit: PiExit) => void> = []
   private readonly preludeLines: string[] = []
+  private stderrTail = ''
+  private exitInfo: PiExit | null = null
 
   private constructor(child: ChildProcessWithoutNullStreams) {
     this.child = child
 
-    const rl = readline.createInterface({ input: child.stdout })
-    rl.on('line', line => {
-      if (!line.trim()) return
-      let msg: any
+    // pi frames RPC records with LF only. Node's `readline` also splits on
+    // U+2028/U+2029, which are legal inside JSON strings, so a model reply that
+    // contains one would tear a record in two and lose it (see pi's rpc.md).
+    const splitter = new JsonlSplitter(line => this.handleLine(line))
+    child.stdout.on('data', (chunk: Buffer) => splitter.push(chunk))
+    child.stdout.on('end', () => splitter.end())
+
+    child.stderr.on('data', (chunk: Buffer) => {
+      // Pass pi's diagnostics through: the ACP client captures this process's
+      // stderr, and it is the only place a pi crash explains itself.
       try {
-        msg = JSON.parse(line)
+        process.stderr.write(chunk)
       } catch {
-        // pi may emit a human-readable prelude on stdout before NDJSON starts.
-        // Capture it so the ACP adapter can surface it on session start.
-        const cleaned = stripAnsi(String(line)).trimEnd()
-        if (cleaned) this.preludeLines.push(cleaned)
-        return
+        // ignore
       }
-
-      if (msg?.type === 'response') {
-        const id = typeof msg.id === 'string' ? msg.id : undefined
-        // `resolve` removes the pending entry. Responses for unknown or already timed-out
-        // ids are dropped: a response is never a pi event, so it must not be broadcast.
-        if (id !== undefined) this.pending.get(id)?.resolve(msg as PiRpcResponse)
-        return
-      }
-
-      for (const h of this.eventHandlers) h(msg as PiRpcEvent)
+      this.stderrTail = (this.stderrTail + chunk.toString('utf8')).slice(-STDERR_TAIL_BYTES)
     })
 
     child.on('exit', (code, signal) => {
+      this.exitInfo = { code, signal, stderrTail: this.stderrTail }
       const err = new Error(`pi process exited (code=${code}, signal=${signal})`)
       for (const [, p] of this.pending) p.reject(err)
       this.pending.clear()
+      for (const h of this.exitHandlers) {
+        try {
+          h(this.exitInfo)
+        } catch {
+          // ignore
+        }
+      }
     })
 
     child.on('error', err => {
@@ -151,23 +188,45 @@ export class PiRpcProcess {
     })
   }
 
+  private handleLine(line: string): void {
+    if (!line.trim()) return
+    let msg: any
+    try {
+      msg = JSON.parse(line)
+    } catch {
+      // pi may emit a human-readable prelude on stdout before NDJSON starts.
+      const cleaned = stripAnsi(String(line)).trimEnd()
+      if (cleaned) this.preludeLines.push(cleaned)
+      return
+    }
+
+    if (msg?.type === 'response') {
+      const id = typeof msg.id === 'string' ? msg.id : undefined
+      // `resolve` removes the pending entry. Responses for unknown or already timed-out
+      // ids are dropped: a response is never a pi event, so it must not be broadcast.
+      if (id !== undefined) this.pending.get(id)?.resolve(msg as PiRpcResponse)
+      return
+    }
+
+    for (const h of [...this.eventHandlers]) h(msg as PiRpcEvent)
+  }
+
   static async spawn(params: SpawnParams): Promise<PiRpcProcess> {
     // On Windows, npm commonly creates pi.cmd / pi.bat launcher scripts.
     const cmd = getPiCommand(params.piCommand)
 
-    // Speed/robustness for ACP:
-    // - themes are irrelevant in rpc mode and can be noisy/slow to load.
-    // Keep extensions + prompt templates enabled because ACP users may rely on them
-    // (e.g. MCP extensions, prompt templates for workflows).
+    // Themes are irrelevant in rpc mode and can be noisy/slow to load. Extensions
+    // and prompt templates stay enabled: ACP users rely on them.
     const args = ['--mode', 'rpc', '--no-themes']
     if (params.sessionPath) args.push('--session', params.sessionPath)
+    for (const extension of params.extensions ?? []) args.push('-e', extension)
 
     // Windows cmd launchers need shell escaping; direct executables use native argv.
     const start = shouldUseShellForPiCommand(cmd) ? crossSpawn : spawn
     const child = start(cmd, args, {
       cwd: params.cwd,
       stdio: 'pipe',
-      env: process.env
+      env: { ...process.env, ...(params.env ?? {}) }
     }) as ChildProcessWithoutNullStreams
 
     // Ensure spawn failures (e.g. ENOENT when pi isn't installed) are surfaced as a
@@ -206,10 +265,6 @@ export class PiRpcProcess {
       throw new PiRpcSpawnError(`Could not start pi (command: ${cmd}).`, { code, cause: e })
     }
 
-    child.stderr.on('data', () => {
-      // leave stderr untouched; ACP clients may capture it.
-    })
-
     const proc = new PiRpcProcess(child)
 
     // Best-effort handshake.
@@ -238,8 +293,25 @@ export class PiRpcProcess {
     }
   }
 
+  /** Subscribe to the child's exit. Fires at most once; immediately if it already exited. */
+  onExit(handler: (exit: PiExit) => void): () => void {
+    if (this.exitInfo) {
+      handler(this.exitInfo)
+      return () => {}
+    }
+    this.exitHandlers.push(handler)
+    return () => {
+      this.exitHandlers = this.exitHandlers.filter(h => h !== handler)
+    }
+  }
+
+  /** Set once the child exited. */
+  get exited(): PiExit | null {
+    return this.exitInfo
+  }
+
   dispose(signal: NodeJS.Signals | number = 'SIGTERM'): void {
-    if (this.child.killed) return
+    if (this.child.killed || this.exitInfo) return
     try {
       this.child.kill(signal as any)
     } catch {
@@ -249,16 +321,39 @@ export class PiRpcProcess {
 
   /**
    * Human-readable stdout lines emitted before RPC NDJSON begins (e.g. Context/Skills/Extensions info).
-   * Themes are typically noisy/less useful for ACP, so callers can filter as needed.
    */
   consumePreludeLines(): string[] {
     const lines = this.preludeLines.splice(0, this.preludeLines.length)
     return lines
   }
 
-  async prompt(message: string, images: unknown[] = []): Promise<void> {
+  /**
+   * Submit a prompt. Resolves with pi's disposition once pi accepted it; a
+   * `handled` prompt starts no run (pi 0.99+). Older pi resolves `undefined`.
+   */
+  async prompt(message: string, images: unknown[] = []): Promise<PromptDisposition | undefined> {
     const res = await this.request({ type: 'prompt', message, images })
     if (!res.success) throw new Error(`pi prompt failed: ${res.error ?? JSON.stringify(res.data)}`)
+    return dispositionOf(res.data, ['started', 'queued', 'handled'] as const)
+  }
+
+  /** Queue a steering message into the running agent loop. */
+  async steer(message: string, images: PiImagePayload[] | unknown[] = []): Promise<QueuedInputDisposition | undefined> {
+    const res = await this.request({ type: 'steer', message, images })
+    if (!res.success) throw new Error(`pi steer failed: ${res.error ?? JSON.stringify(res.data)}`)
+    return dispositionOf(res.data, ['queued', 'handled'] as const)
+  }
+
+  /** Remove queued steering/follow-up messages; returns their text. */
+  async clearQueue(): Promise<{ steering: string[]; followUp: string[] }> {
+    const res = await this.request({ type: 'clear_queue' })
+    if (!res.success) throw new Error(`pi clear_queue failed: ${res.error ?? JSON.stringify(res.data)}`)
+    const data = (res.data ?? {}) as { steering?: unknown; followUp?: unknown }
+    const strings = (v: unknown) => (Array.isArray(v) ? v.filter((s): s is string => typeof s === 'string') : [])
+    return {
+      steering: strings(data.steering),
+      followUp: strings(data.followUp)
+    }
   }
 
   async abort(): Promise<void> {
@@ -366,6 +461,10 @@ export class PiRpcProcess {
   }
 
   private request(cmd: PiRpcCommand, opts?: { timeoutMs?: number }): Promise<PiRpcResponse> {
+    if (this.exitInfo) {
+      return Promise.reject(new Error(`pi process exited (code=${this.exitInfo.code}, signal=${this.exitInfo.signal})`))
+    }
+
     const id = crypto.randomUUID()
     const withId = { ...cmd, id }
     const timeoutMs = opts?.timeoutMs

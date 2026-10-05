@@ -1,5 +1,11 @@
 import type { AgentSideConnection } from '@agentclientprotocol/sdk'
-import type { PiRpcEvent, PiSessionStats } from '../../src/pi-rpc/process.js'
+import type {
+  PiExit,
+  PiRpcEvent,
+  PiSessionStats,
+  PromptDisposition,
+  QueuedInputDisposition
+} from '../../src/pi-rpc/process.js'
 
 type SessionUpdateMsg = Parameters<AgentSideConnection['sessionUpdate']>[0]
 
@@ -24,6 +30,7 @@ export class FakeAgentSideConnection {
 
 export class FakePiRpcProcess {
   private handlers: Array<(ev: PiRpcEvent) => void> = []
+  private exitHandlers: Array<(exit: PiExit) => void> = []
 
   // spies
   readonly prompts: Array<{ message: string; attachments: unknown[] }> = []
@@ -34,6 +41,17 @@ export class FakePiRpcProcess {
   sessionStats: PiSessionStats = {}
   /** When set, `getSessionStats()` rejects with this error. */
   sessionStatsError: unknown = null
+
+  /** What `prompt()` reports pi did with the prompt (pi 0.99+). */
+  promptDisposition: PromptDisposition | undefined = 'started'
+  /** When set, `prompt()` rejects with this error. */
+  promptError: unknown = null
+
+  readonly steers: Array<{ message: string; images: unknown[] }> = []
+  steerDisposition: QueuedInputDisposition | undefined = 'queued'
+  clearQueueCount = 0
+  /** Call order of `clearQueue` / `abort`, to check cancel sequencing. */
+  readonly controlCalls: string[] = []
 
   onEvent(handler: (ev: PiRpcEvent) => void): () => void {
     this.handlers.push(handler)
@@ -46,13 +64,46 @@ export class FakePiRpcProcess {
     for (const h of this.handlers) h(ev)
   }
 
-  async prompt(message: string, attachments: unknown[] = []): Promise<void> {
+  onExit(handler: (exit: PiExit) => void): () => void {
+    this.exitHandlers.push(handler)
+    return () => {
+      this.exitHandlers = this.exitHandlers.filter(h => h !== handler)
+    }
+  }
+
+  /** Simulate the pi child exiting. */
+  exit(exit: Partial<PiExit> = {}) {
+    const info: PiExit = {
+      code: exit.code ?? 1,
+      signal: exit.signal ?? null,
+      stderrTail: exit.stderrTail ?? ''
+    }
+    for (const h of this.exitHandlers) h(info)
+  }
+
+  async prompt(message: string, attachments: unknown[] = []): Promise<PromptDisposition | undefined> {
     this.prompts.push({ message, attachments })
+    if (this.promptError) throw this.promptError
+    return this.promptDisposition
+  }
+
+  async steer(message: string, images: unknown[] = []): Promise<QueuedInputDisposition | undefined> {
+    this.steers.push({ message, images })
+    return this.steerDisposition
+  }
+
+  async clearQueue(): Promise<{ steering: string[]; followUp: string[] }> {
+    this.clearQueueCount += 1
+    this.controlCalls.push('clearQueue')
+    return { steering: [], followUp: [] }
   }
 
   async abort(): Promise<void> {
     this.abortCount += 1
+    this.controlCalls.push('abort')
   }
+
+  dispose() {}
 
   async sendExtensionUiResponse(response: unknown): Promise<void> {
     this.extensionUiResponses.push(response)

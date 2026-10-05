@@ -1,6 +1,14 @@
 import { AgentSideConnection, ndJsonStream } from '@agentclientprotocol/sdk'
-import { PiAcpAgent } from './acp/agent.js'
+import { ADAPTER_VERSION, PiAcpAgent } from './acp/agent.js'
 import { getPiCommand, shouldUseShellForPiCommand } from './pi-rpc/command.js'
+
+// `--version` answers and exits (install verification and diagnostics probe it);
+// without it the adapter would start serving ACP on stdin.
+if (process.argv.includes('--version') || process.argv.includes('-v')) {
+  process.stdout.write(`${ADAPTER_VERSION}\n`)
+  process.exit(0)
+}
+
 // Terminal Auth entrypoint. The ACP client launches the agent with `--terminal-login`.
 if (process.argv.includes('--terminal-login')) {
   const { spawnSync } = await import('node:child_process')
