@@ -1,209 +1,135 @@
-# pi-acp
+# codeg-pi-acp
 
-ACP ([Agent Client Protocol](https://agentclientprotocol.com/overview/introduction)) adapter for [`pi`](https://github.com/earendil-works/pi) coding agent (fka shitty coding agent).
+[![npm version](https://img.shields.io/npm/v/codeg-pi-acp)](https://www.npmjs.com/package/codeg-pi-acp)
+[![CI status](https://github.com/xintaofei/pi-acp/actions/workflows/ci.yml/badge.svg)](https://github.com/xintaofei/pi-acp/actions/workflows/ci.yml)
 
-`pi-acp` communicates **ACP JSON-RPC 2.0 over stdio** to an ACP client (e.g. Zed editor) and spawns `pi --mode rpc`, bridging requests/events between the two.
+An [Agent Client Protocol](https://agentclientprotocol.com) (ACP) adapter for the
+[pi](https://github.com/earendil-works/pi) coding agent. It runs `pi --mode rpc` as a child process and translates
+between pi's RPC records and ACP over stdio.
 
-## Status
+It is the adapter behind **[codeg](https://github.com/xintaofei/codeg)**'s Pi agent and works with any ACP client.
+It is a fork of [svkozak/pi-acp](https://github.com/svkozak/pi-acp) 0.0.34 (MIT), brought up to pi 1.0. This
+repository keeps upstream's history, layout (`src/pi-rpc/` talks to pi, `src/acp/` speaks ACP) and formatting, so
+upstream changes can still be merged.
 
-This is an MVP-style adapter intended to be useful today and easy to iterate on. Some ACP features may be not implemented or are not supported (see [Limitations](#limitations)). Development is centered around [Zed](https://zed.dev) editor support, other clients may have varying levels of compatibility.
+## Requirements
 
-Expect some minor breaking changes.
+- **pi 0.99.0 or newer** on your `PATH`, configured for your model provider:
 
-## Features
+  ```bash
+  npm install -g @earendil-works/pi-coding-agent
+  ```
 
-- Streams assistant output as ACP `agent_message_chunk`
-- Maps pi tool execution to ACP `tool_call` / `tool_call_update`
-  - Tool call locations are surfaced when available for ACP clients that support opening the referenced file/context
-  - Relative file paths from pi are resolved against the session cwd before being emitted as ACP tool locations, which enables follow-along features in clients like Zed
-  - For `edit`, `pi-acp` attempts to infer a 1-based line number from a unique `oldText` match in the pre-edit file snapshot and includes it in the emitted tool location when possible
-  - For `edit`, `pi-acp` snapshots the file before the tool runs and emits an ACP **structured diff** (`oldText`/`newText`) on completion when possible
-- Session persistence
-  - pi stores its own sessions in `~/.pi/agent/sessions/...`
-  - `pi-acp` stores a small mapping file at `~/.pi/pi-acp/session-map.json` so `session/load` can reattach to a previous pi session file
-- Slash commands
-  - Loads file-based slash commands compatible with pi’s conventions
-  - Adds a small set of built-in commands for headless/editor usage
-  - Supports skill commands (if enabled in pi settings, they appear as `/skill:skill-name` in the ACP client)
-- Context window usage
-  - Reports pi's real context occupancy (`get_session_stats` → `contextUsage`) to the client as ACP `usage_update` after each turn, on `session/new` and `session/load`, and after a model switch
-  - Requires a pi version whose `get_session_stats` response includes `contextUsage`; otherwise no usage is reported
-  - Right after compaction pi may not have a trustworthy token count yet, so the client keeps the previous value until the next model response
-- Skills are loaded by pi directly and are available in ACP sessions
-- (Zed) `pi-acp` emits “startup info” block into the session (pi version, context, skills, prompts, extensions - similar to `pi` in the terminal). You can disable it by setting `quietStartup: true` in pi settings (`~/.pi/agent/settings.json` or `<project>/.pi/settings.json`). When `quietStartup` is enabled, `pi-acp` will still emit a 'New version available' message if the installed pi version is outdated.
-- (Zed) Session history is supported in Zed starting with [`v0.225.0`](https://zed.dev/releases/preview/0.225.0). Session loading / history maps to pi's session files. Sessions can be resumed both in `pi` and in the ACP client.
+  An older pi is refused when a session opens, with a message starting `pi runtime is too old for codeg-pi-acp`.
 
-## Prerequisites
+- **Node.js 22.19 or newer** (pi's own minimum).
 
-Make sure pi is installed
+## Use it
+
+### codeg
+
+codeg installs and updates this adapter for its Pi agent. There is nothing to configure.
+
+### Zed or another ACP client
 
 ```bash
-npm install -g @earendil-works/pi-coding-agent
-```
-
-- Node.js 22+
-- `pi` v0.81.0+ installed and available on your `PATH` (the adapter runs the `pi` executable)
-- Configure `pi` separately for your model providers/API keys
-
-## Install
-
-### Add pi-acp to your ACP client, e.g. [Zed](https://zed.dev/docs/agents/external-agents/)
-
-#### Using ACP Registry in Zed or other clients that support it:
-
-In Zed launch the registry with `zed: acp registry` command and select `pi ACP` adapter from the list. This will automatically add the agent server configuration to your `settings.json` and keep it up to date:
-
-```json
-  "agent_servers": {
-    "pi-acp": {
-      "type": "registry",
-    },
-  }
-```
-
-#### Using with `npx` (no global install needed, always loads the latest version):
-
-Add the following to your Zed `settings.json`:
-
-```json
-  "agent_servers": {
-    "pi": {
-      "type": "custom",
-      "command": "npx",
-      "args": ["-y", "pi-acp"],
-      "env": {}
-    }
-  }
-```
-
-#### Global install
-
-```bash
-npm install -g pi-acp
+npm install -g codeg-pi-acp
 ```
 
 ```json
   "agent_servers": {
     "pi": {
       "type": "custom",
-      "command": "pi-acp",
+      "command": "codeg-pi-acp",
       "args": [],
       "env": {}
     }
   }
 ```
 
-#### From source
+Or without a global install: `"command": "npx", "args": ["-y", "codeg-pi-acp"]`.
+
+`codeg-pi-acp --version` prints the adapter's version.
+
+## What differs from upstream
+
+- **MCP reaches pi.** The `mcpServers` of `session/new` and `session/load` are handed to pi's native MCP (pi 0.99+) by
+  a small pi extension (`src/pi-extension/codeg-bridge.ts`, built to `dist/codeg-bridge.mjs` and loaded with `pi -e`)
+  that calls `pi.registerMcpServer()` with `exposure: "direct"`. The servers travel in a private file the extension
+  deletes, and `env` / `headers` values are escaped so pi does not run `!command` or interpolate `$VAR` in them. stdio
+  and streamable HTTP servers are supported; SSE servers are reported as skipped (pi rejects them). The response's
+  `_meta.piAcp.mcp` lists what was registered and what was skipped. Servers pi reads from its own `mcp.json` files
+  are unaffected.
+- **pi 0.99.0 is the minimum.** The extension reports on every launch, which is how an older pi is detected.
+- **Failed turns fail.** A turn whose final assistant message has `stopReason: "error"` rejects `session/prompt` with
+  pi's error text instead of ending `end_turn`; `length` ends `max_tokens`.
+- **Extension commands finish.** A prompt pi reports as `disposition: "handled"` settles at once (pi starts no run),
+  and the response carries `_meta.piAcp.disposition: "handled"`.
+- **Native steering.** `initialize` advertises `_meta.steering.supported`, and `_session/steering` puts the message
+  on pi's own steering queue. It answers `injected` as soon as pi has queued it, so a client waiting for the answer is
+  never held up by a long tool call. pi delivers it before its next model call; a steer that reaches pi after the run's
+  last look at its queue is taken back and run as a continuation of the same `session/prompt`. It answers
+  `promptRequired` (not consumed) when no turn is running, the turn is ending, or the steer has no text. It never
+  starts a turn of its own.
+- **Session extensions.** pi extension notifications are sent as session notices, and compaction as
+  `compaction_update`, when the client advertises `clientCapabilities.session.notices` / `.compaction`; otherwise as
+  text, as before.
+- **codemode.** Calls a tool makes through `ctx.executeTool()` carry `_meta.piAcp.parentToolCallId`, and text-less
+  partial results are not printed as JSON.
+- **Robustness.** pi's stdout is framed on LF only (`readline` also splits on U+2028/U+2029, which are legal inside
+  JSON strings); pi's stderr is passed through; a pi that exits mid-turn fails the turn with its exit status and the
+  tail of its stderr, which is read before the exit is reported.
+- **No startup banner.** Upstream ran `pi --version` and `npm view` on every `session/new` to build one;
+  `_meta.piAcp.startupInfo` is always `null`.
+- Built on `@agentclientprotocol/sdk` 1.5.1.
+
+## Environment variables
+
+- `PI_ACP_PI_COMMAND`: the pi executable to run. Default `pi` (`pi.cmd` on Windows).
+- `PI_ACP_ENABLE_EMBEDDED_CONTEXT=true`: advertise ACP `promptCapabilities.embeddedContext`. Otherwise compliant
+  clients should not send embedded `resource` blocks; any that arrive are still turned into plain-text context.
+- `PI_CODING_AGENT_DIR`: pi's own setting for its agent directory (default `~/.pi/agent`), honored where the adapter
+  reads pi's settings and session files.
+
+## Slash commands
+
+- **File-based commands** (pi prompts) from `~/.pi/agent/prompts/**/*.md` and `<cwd>/.pi/prompts/**/*.md`.
+- **Skill commands**, when enabled in pi settings, as `/skill:<name>`.
+- **Built-ins:** `/compact [instructions]`, `/autocompact on|off|toggle`, `/export` (HTML into the session cwd),
+  `/session` (stats), `/name <name>`, `/steering` and `/follow-up` (pi's queue delivery modes), `/changelog`.
+- Commands registered by pi extensions are not listed, but typing one sends it to pi, which runs it.
+
+## Authentication
+
+The agent advertises Terminal Auth. A client such as Zed shows an **Authenticate** button that runs:
 
 ```bash
-npm install
-npm run build
+codeg-pi-acp --terminal-login
 ```
 
-Point your ACP client to the built `dist/index.js`:
-
-```json
-  "agent_servers": {
-    "pi": {
-      "type": "custom",
-      "command": "node",
-      "args": ["/path/to/pi-acp/dist/index.js"],
-      "env": {}
-    }
-  }
-```
-
-### Environment variables
-
-- `PI_ACP_ENABLE_EMBEDDED_CONTEXT=true` advertises ACP `promptCapabilities.embeddedContext` support to the client.
-- Default: unset/any other value means `false`.
-- When disabled, compliant ACP clients should avoid sending embedded `resource` blocks. If they send them anyway, `pi-acp` still degrades gracefully by converting them into plain-text prompt context.
-
-You can add the environment variable in the Zed settings with:
-
-```json
-  "agent_servers": {
-    "pi": {
-      "type": "custom",
-      "command": "node",
-      "args": ["/path/to/pi-acp/dist/index.js"],
-      "env": {
-          "PI_ACP_ENABLE_EMBEDDED_CONTEXT": "true",
-      }
-    }
-  }
-```
-
-### Slash commands
-
-`pi-acp` supports slash commands:
-
-#### 1) File-based commands (aka prompts)
-
-Loaded from:
-
-- User commands: `~/.pi/agent/prompts/**/*.md`
-- Project commands: `<cwd>/.pi/prompts/**/*.md`
-
-#### 2) Built-in commands
-
-- `/compact [instructions...]` – run pi compaction (optionally with custom instructions)
-- `/autocompact on|off|toggle` – toggle automatic compaction
-- `/export` – export the current session to HTML in the session `cwd`
-- `/session` – show session stats (tokens/messages/cost/session file)
-- `/name <name>` – set session display name
-- `/queue all|one-at-a-time` – set pi queue mode (unstable feature)
-- `/changelog` – print the installed pi changelog (best-effort)
-- `/steering` - maps to `pi` Steering Mode, get/set
-- `/follow-up` - pats to `pi` Follow-up Mode, get/set
-
-Other built-in commands:
-
-- `/model` - not implemented (use the model selector UI in Zed)
-- `/thinking` - maps to 'mode' selector in Zed
-- `/clear` - not implemented (use ACP client 'new' command)
-
-#### 3) Skill commands
-
-- Skill commands can be enabled in pi settings and will appear in the slash command list in ACP client as `/skill:skill-name`.
-
-**Note**: Slash commands provided by pi extensions are not currently supported.
-
-## Authentication (ACP Registry support)
-
-This agent supports **Terminal Auth** for the [ACP Registry](https://agentclientprotocol.com/get-started/registry).
-In Zed, this will show an **Authenticate** banner that launches pi in a terminal.
-Launch pi in a terminal for interactive login/setup:
-
-```bash
-pi-acp --terminal-login
-```
-
-Your ACP client can also invoke this automatically based on the agent's advertised `authMethods`.
+which starts pi interactively so you can log in or set API keys.
 
 ## Development
 
 ```bash
-npm install
-npm run dev        # run from src via tsx
-npm run build
+npm ci
+npm run typecheck
 npm run lint
-npm run test
+npm test               # no pi needed: tests fake pi at the RPC boundary
+npm run build
+npm run smoke:packed   # pack, install the tarball, and initialize the installed adapter
 ```
 
-Project layout:
-
-- `src/acp/*` – ACP server + translation layer
-- `src/pi-rpc/*` – pi subprocess wrapper (RPC protocol)
+`npm run dev` builds and starts the adapter on stdio. To try a local build in a client, point it at
+`node /path/to/pi-acp/dist/index.js`. See [CONTRIBUTING.md](CONTRIBUTING.md) for releases and for merging upstream.
 
 ## Limitations
 
-- No ACP filesystem delegation (`fs/*`) and no ACP terminal delegation (`terminal/*`). pi reads/writes and executes locally.
-- MCP servers are accepted in ACP params and stored in session state, but not wired through to pi in this adapter. If you use [pi MCP adapter](https://github.com/nicobailon/pi-mcp-adapter) it will be available in the ACP client.
-- Assistant streaming is currently sent as `agent_message_chunk` (no separate thought stream).
-- Queue is implemented client-side and should work like pi's `one-at-a-time`
-- ~~ACP clients don't yet suport session history, but ACP sessions from `pi-acp` can be `/resume`d in pi directly~~
+- No ACP filesystem (`fs/*`) or terminal (`terminal/*`) delegation: pi reads, writes and runs commands itself.
+- SSE MCP servers are skipped (pi supports stdio and streamable HTTP).
+- Sessions map to pi's session files (`~/.pi/agent/sessions/`); the adapter keeps a small index in
+  `~/.pi/pi-acp/session-map.json`, shared with upstream's adapter.
 
 ## License
 
-MIT (see [LICENSE](LICENSE)).
+MIT, see [LICENSE](LICENSE). Copyright Sergii Kozak (upstream pi-acp) and the codeg-pi-acp contributors.
