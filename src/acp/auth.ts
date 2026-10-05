@@ -54,6 +54,7 @@ function terminalAuthLaunchSpec(): { command: string; args: string[] } {
     }
   }
 
-  // Fallback: assume `pi-acp` is on PATH.
-  return { command: 'pi-acp', args: ['--terminal-login'] }
+  // Fallback: assume this package's bin is on PATH (a global npm install runs
+  // it through a shim, so argv[1] is not the .js file).
+  return { command: 'codeg-pi-acp', args: ['--terminal-login'] }
 }
