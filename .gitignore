@@ -9,3 +9,9 @@ dist
 
 /agentDocs
 .DS_Store
+
+# npm pack output
+*.tgz
+
+# Local working notes
+/.docs/

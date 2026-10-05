@@ -1,0 +1,91 @@
+name: Release
+
+# A version tag publishes:
+#
+#     npm version patch      # bumps package.json and tags vX.Y.Z
+#     git push --follow-tags
+#
+# Authentication is npm trusted publishing (OIDC): the repository holds no npm
+# token. GitHub issues a credential at run time and npm checks it against "this
+# workflow file in this repository", so THIS FILE'S NAME is part of that
+# identity. Renaming it means updating the package's settings on npmjs.com, or
+# publishing fails with an authentication error that does not say why. The
+# one-time setup is in CONTRIBUTING.md.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  id-token: write # OIDC, required by trusted publishing
+  contents: write # create the GitHub Release
+
+jobs:
+  verify:
+    name: ${{ matrix.os }} gate
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        # The publish job below is the Ubuntu gate.
+        os: [windows-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm test
+      - run: npm run smoke:packed
+
+  publish:
+    name: Publish to npm
+    needs: verify
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          # A release builds from source alone, with nothing left over from an earlier run.
+          package-manager-cache: false
+
+      # Trusted publishing needs npm >= 11.5.1. Pin the major so a new npm major
+      # does not change behavior in the middle of a release.
+      - run: npm i -g npm@^11.5.1
+
+      - run: npm ci
+
+      # npm publishes the version in package.json whatever the tag says, and a
+      # publish cannot be taken back: refuse a tag that does not match.
+      - name: Tag matches package.json
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag $GITHUB_REF_NAME is $tag, package.json says $pkg"
+            exit 1
+          fi
+
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run build
+      - run: npm test
+      - run: npm run smoke:packed
+
+      # `prepublishOnly` runs the gates again, on purpose: it also guards a
+      # publish by hand. No --provenance (OIDC publishing attests by itself) and
+      # no --access public (an unscoped package is public).
+      - run: npm publish
+
+      - name: Create GitHub Release
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
