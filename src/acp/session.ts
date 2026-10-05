@@ -42,10 +42,36 @@ type SessionCreateParams = {
   conn: AgentSideConnection
   fileCommands?: import('./slash-commands.js').FileSlashCommand[]
   piCommand?: string
+  clientCaps?: ClientSessionCaps
 }
+
+/**
+ * The unstable ACP session extensions the client advertised at `initialize`
+ * (`clientCapabilities.session`). Each REPLACES a fallback the adapter would
+ * otherwise use, so neither is sent unless the client asked for it.
+ */
+export type ClientSessionCaps = {
+  /** Session Notices RFD: pi extension notifications become `notice`s. */
+  notices: boolean
+  /** Session Compaction RFD: pi's compaction becomes `compaction_update`s. */
+  compaction: boolean
+}
+
+const NO_SESSION_CAPS: ClientSessionCaps = { notices: false, compaction: false }
 
 /** How a turn ended, in ACP terms. Failures reject the turn instead. */
 export type StopReason = 'end_turn' | 'cancelled' | 'max_tokens'
+
+/**
+ * A finished turn: its stop reason, and whether pi HANDLED the prompt without
+ * a run (an extension command or input handler consumed it), in which case
+ * the turn produced no reply by design.
+ */
+export type TurnOutcome = { stopReason: StopReason; handled: boolean }
+
+function outcome(stopReason: StopReason, handled = false): TurnOutcome {
+  return { stopReason, handled }
+}
 
 /** What happened to a `_session/steering` message. */
 export type SteerOutcome = 'injected' | 'promptRequired'
@@ -57,15 +83,17 @@ type AssistantOutcome = {
 }
 
 type PendingTurn = {
-  resolve: (reason: StopReason) => void
+  resolve: (outcome: TurnOutcome) => void
   reject: (err: unknown) => void
   lastAssistant: AssistantOutcome | null
+  /** pi consumed the prompt without starting a run (disposition `handled`). */
+  handled: boolean
 }
 
 type QueuedTurn = {
   message: string
   images: unknown[]
-  resolve: (reason: StopReason) => void
+  resolve: (outcome: TurnOutcome) => void
   reject: (err: unknown) => void
 }
 
@@ -290,7 +318,8 @@ export class SessionManager {
       proc,
       conn: params.conn,
       fileCommands: params.fileCommands ?? [],
-      mcpDelivery
+      mcpDelivery,
+      clientCaps: params.clientCaps
     })
 
     this.sessions.set(sessionId, session)
@@ -324,7 +353,8 @@ export class SessionManager {
       proc: params.proc,
       conn: params.conn,
       fileCommands: params.fileCommands ?? [],
-      mcpDelivery: params.mcpDelivery ?? null
+      mcpDelivery: params.mcpDelivery ?? null,
+      clientCaps: params.clientCaps
     })
 
     this.sessions.set(sessionId, session)
@@ -338,6 +368,7 @@ export class PiAcpSession {
   readonly mcpServers: McpServer[]
   /** How the session's MCP servers reached pi; `null` when none were given. */
   readonly mcpDelivery: McpDeliveryReport | null
+  private readonly clientCaps: ClientSessionCaps
 
   private startupInfo: string | null = null
   private startupInfoSent = false
@@ -401,11 +432,13 @@ export class PiAcpSession {
     conn: AgentSideConnection
     fileCommands?: FileSlashCommand[]
     mcpDelivery?: McpDeliveryReport | null
+    clientCaps?: ClientSessionCaps
   }) {
     this.sessionId = opts.sessionId
     this.cwd = opts.cwd
     this.mcpServers = opts.mcpServers
     this.mcpDelivery = opts.mcpDelivery ?? null
+    this.clientCaps = opts.clientCaps ?? NO_SESSION_CAPS
     this.proc = opts.proc
     this.conn = opts.conn
     this.fileCommands = opts.fileCommands ?? []
@@ -439,13 +472,23 @@ export class PiAcpSession {
   }
 
   async prompt(message: string, images: unknown[] = []): Promise<StopReason> {
+    return (await this.promptTurn(message, images)).stopReason
+  }
+
+  /** {@link prompt}, also saying whether pi handled it without a run. */
+  async promptTurn(message: string, images: unknown[] = []): Promise<TurnOutcome> {
     if (this.deadMessage) throw turnError(this.deadMessage)
 
     // pi RPC mode disables slash command expansion, so we do it here.
     const expandedMessage = expandSlashCommand(message, this.fileCommands)
 
-    const turnPromise = new Promise<StopReason>((resolve, reject) => {
-      const queued: QueuedTurn = { message: expandedMessage, images, resolve, reject }
+    const turnPromise = new Promise<TurnOutcome>((resolve, reject) => {
+      const queued: QueuedTurn = {
+        message: expandedMessage,
+        images,
+        resolve,
+        reject
+      }
 
       // If a turn is already running, enqueue.
       if (this.pendingTurn) {
@@ -530,7 +573,7 @@ export class PiAcpSession {
 
     if (this.turnQueue.length) {
       const queued = this.turnQueue.splice(0, this.turnQueue.length)
-      for (const t of queued) t.resolve('cancelled')
+      for (const t of queued) t.resolve(outcome('cancelled'))
       this.emit({
         sessionUpdate: 'session_info_update',
         _meta: { piAcp: { queueDepth: 0, running: Boolean(this.pendingTurn) } }
@@ -556,8 +599,8 @@ export class PiAcpSession {
    */
   abandon(): void {
     for (const s of this.pendingSteers.splice(0, this.pendingSteers.length)) s.resolve('promptRequired')
-    for (const t of this.turnQueue.splice(0, this.turnQueue.length)) t.resolve('cancelled')
-    this.pendingTurn?.resolve('cancelled')
+    for (const t of this.turnQueue.splice(0, this.turnQueue.length)) t.resolve(outcome('cancelled'))
+    this.pendingTurn?.resolve(outcome('cancelled'))
     this.pendingTurn = null
   }
 
@@ -629,24 +672,24 @@ export class PiAcpSession {
   private resolveTurn(turn: PendingTurn | null): void {
     if (!turn) return
     if (this.cancelRequested) {
-      turn.resolve('cancelled')
+      turn.resolve(outcome('cancelled'))
       return
     }
-    const outcome = turn.lastAssistant
-    switch (outcome?.stopReason) {
+    const last = turn.lastAssistant
+    switch (last?.stopReason) {
       case 'error':
         // pi exhausted its retries (or the error was not retryable). Reject so the
         // client can tell a failed turn from one that merely said nothing.
-        turn.reject(turnError(turnFailureMessage(outcome)))
+        turn.reject(turnError(turnFailureMessage(last)))
         return
       case 'aborted':
-        turn.resolve('cancelled')
+        turn.resolve(outcome('cancelled'))
         return
       case 'length':
-        turn.resolve('max_tokens')
+        turn.resolve(outcome('max_tokens'))
         return
       default:
-        turn.resolve('end_turn')
+        turn.resolve(outcome('end_turn', turn.handled))
     }
   }
 
@@ -673,7 +716,7 @@ export class PiAcpSession {
     const error = turnError(this.deadMessage)
     void this.flushEmits().finally(() => {
       if (turn) {
-        if (this.cancelRequested) turn.resolve('cancelled')
+        if (this.cancelRequested) turn.resolve(outcome('cancelled'))
         else turn.reject(error)
       }
       for (const t of queued) t.reject(error)
@@ -754,7 +797,8 @@ export class PiAcpSession {
     const turn: PendingTurn = {
       resolve: t.resolve,
       reject: t.reject,
-      lastAssistant: null
+      lastAssistant: null,
+      handled: false
     }
     this.pendingTurn = turn
 
@@ -773,6 +817,7 @@ export class PiAcpSession {
         // An extension command or input handler consumed the prompt: no run starts,
         // so no `agent_settled` will ever come for it (pi 0.99+).
         if (disposition === 'handled' && this.pendingTurn === turn && !this.inAgentLoop) {
+          turn.handled = true
           void this.settleTurn()
         }
       })
@@ -784,7 +829,7 @@ export class PiAcpSession {
           this.inAgentLoop = false
 
           if (this.cancelRequested) {
-            turn.resolve('cancelled')
+            turn.resolve(outcome('cancelled'))
           } else {
             // Auth/config issues surface as AUTH_REQUIRED so clients can offer a login.
             const authErr = maybeAuthRequiredError(err)
@@ -1080,7 +1125,19 @@ export class PiAcpSession {
           startedAt: Date.now(),
           reason
         }
-        this.emitCompaction('in_progress', reason, null)
+        if (this.clientCaps.compaction) {
+          this.emitCompaction('in_progress', reason, null)
+        } else if (reason !== 'manual') {
+          // A client without the compaction extension still hears about the
+          // automatic kind (a manual `/compact` answers on its own).
+          this.emit({
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'Context nearing limit, running automatic compaction...'
+            } satisfies ContentBlock
+          })
+        }
         break
       }
 
@@ -1090,7 +1147,17 @@ export class PiAcpSession {
         const aborted = Boolean((ev as any).aborted)
         const error = typeof (ev as any).errorMessage === 'string' ? (ev as any).errorMessage : null
         const status = result ? 'completed' : aborted ? 'cancelled' : 'failed'
-        this.emitCompaction(status, reason ?? 'threshold', result ?? null, error)
+        if (this.clientCaps.compaction) {
+          this.emitCompaction(status, reason ?? 'threshold', result ?? null, error)
+        } else if (reason !== 'manual' && status === 'completed') {
+          this.emit({
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'Automatic compaction finished; context was summarized to continue the session.'
+            } satisfies ContentBlock
+          })
+        }
         this.compaction = null
         break
       }
@@ -1254,7 +1321,7 @@ export class PiAcpSession {
       compactionId: compaction.id,
       status,
       ...(typeof result?.summary === 'string' && result.summary
-        ? { summary: { type: 'text', text: result.summary } }
+        ? { summary: [{ type: 'text', text: result.summary }] }
         : {}),
       ...(error ? { error } : {}),
       _meta: { contextCompaction: block }
@@ -1291,11 +1358,25 @@ export class PiAcpSession {
     }
 
     if (method === 'notify') {
-      this.emit({
-        sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: stringProp(ev, 'message') ?? 'Pi notification' } satisfies ContentBlock,
-        _meta: { piAcp: { notify: { level: stringProp(ev, 'notifyType') ?? 'info' } } }
-      })
+      // pi's `ctx.ui.notify()` is a transient toast, never conversation: a
+      // client with the Session Notices extension shows it as one; any other
+      // gets the old chunk, marked so it can be told from the reply.
+      const message = stringProp(ev, 'message') ?? 'Pi notification'
+      const level = stringProp(ev, 'notifyType') ?? 'info'
+      if (this.clientCaps.notices && message.trim()) {
+        this.emitRaw({
+          sessionUpdate: 'notice',
+          severity: level === 'warning' || level === 'error' ? level : 'info',
+          title: message,
+          _meta: { piAcp: { notify: { level } } }
+        })
+      } else {
+        this.emit({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: message } satisfies ContentBlock,
+          _meta: { piAcp: { notify: { level } } }
+        })
+      }
       await this.proc.sendExtensionUiResponse({ id, cancelled: true })
       return
     }

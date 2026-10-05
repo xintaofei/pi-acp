@@ -6,7 +6,7 @@ import { FakeAgentSideConnection, FakePiRpcProcess, asAgentConn } from '../helpe
 
 const tick = () => new Promise(r => setTimeout(r, 0))
 
-function harness() {
+function harness(clientCaps = { notices: false, compaction: false }) {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
   const session = new PiAcpSession({
@@ -15,7 +15,8 @@ function harness() {
     mcpServers: [],
     proc: proc as any,
     conn: asAgentConn(conn),
-    fileCommands: []
+    fileCommands: [],
+    clientCaps
   })
   const updates = () => conn.updates.map(u => u.update as any)
   return { conn, proc, session, updates }
@@ -76,8 +77,17 @@ test('length maps to max_tokens and aborted to cancelled', async () => {
 test('a prompt pi handled without a run settles at once (no agent_settled comes)', async () => {
   const { proc, session } = harness()
   proc.promptDisposition = 'handled'
-  assert.equal(await session.prompt('/my-extension-command'), 'end_turn')
+  assert.deepEqual(await session.promptTurn('/my-extension-command'), {
+    stopReason: 'end_turn',
+    handled: true
+  })
   assert.equal(session.hasActiveTurn, false)
+  // An ordinary turn is not marked.
+  proc.promptDisposition = 'started'
+  const turn = session.promptTurn('hi')
+  await tick()
+  proc.emit({ type: 'agent_settled' })
+  assert.deepEqual(await turn, { stopReason: 'end_turn', handled: false })
 })
 
 test('a prompt pi rejected outright rejects the turn with the reason', async () => {
@@ -217,7 +227,7 @@ test('toolcall_start (delta-only wire) shows a pending card before the arguments
 })
 
 test('compaction is reported as one compaction_update card per compaction', async () => {
-  const { proc, updates } = harness()
+  const { proc, updates } = harness({ notices: false, compaction: true })
   proc.emit({ type: 'compaction_start', reason: 'threshold' })
   proc.emit({
     type: 'compaction_end',
@@ -244,7 +254,7 @@ test('compaction is reported as one compaction_update card per compaction', asyn
   assert.equal(start.status, 'in_progress')
   assert.equal(done.compactionId, start.compactionId)
   assert.equal(done.status, 'completed')
-  assert.deepEqual(done.summary, { type: 'text', text: 'The story so far.' })
+  assert.deepEqual(done.summary, [{ type: 'text', text: 'The story so far.' }])
   assert.equal(done._meta.contextCompaction.trigger, 'automatic')
   assert.equal(done._meta.contextCompaction.preTokens, 150000)
   assert.equal(done._meta.contextCompaction.postTokens, 32000)
@@ -254,6 +264,67 @@ test('compaction is reported as one compaction_update card per compaction', asyn
   assert.equal(failed.error, 'summarization failed')
   assert.equal(failed._meta.contextCompaction.trigger, 'manual')
   assert.equal(failed._meta.contextCompaction.error, 'summarization failed')
+})
+
+test('without the compaction extension, only automatic compaction is announced, in prose', async () => {
+  const { proc, updates } = harness()
+  proc.emit({ type: 'compaction_start', reason: 'threshold' })
+  proc.emit({
+    type: 'compaction_end',
+    reason: 'threshold',
+    result: { summary: 's', tokensBefore: 1 },
+    aborted: false,
+    willRetry: false
+  })
+  // A manual /compact answers through its own command reply.
+  proc.emit({ type: 'compaction_start', reason: 'manual' })
+  proc.emit({
+    type: 'compaction_end',
+    reason: 'manual',
+    result: { summary: 's' },
+    aborted: false,
+    willRetry: false
+  })
+  await tick()
+  assert.deepEqual(
+    updates().map(u => [u.sessionUpdate, u.content?.text]),
+    [
+      ['agent_message_chunk', 'Context nearing limit, running automatic compaction...'],
+      ['agent_message_chunk', 'Automatic compaction finished; context was summarized to continue the session.']
+    ]
+  )
+})
+
+test('an extension notification is a notice for a client that takes them', async () => {
+  const { proc, updates } = harness({ notices: true, compaction: false })
+  proc.emit({
+    type: 'extension_ui_request',
+    id: 'n1',
+    method: 'notify',
+    message: 'Released pi-caffeinate',
+    notifyType: 'warning'
+  })
+  await tick()
+  const [notice] = updates()
+  assert.equal(notice.sessionUpdate, 'notice')
+  assert.equal(notice.severity, 'warning')
+  assert.equal(notice.title, 'Released pi-caffeinate')
+  assert.deepEqual(proc.extensionUiResponses, [{ id: 'n1', cancelled: true }])
+})
+
+test('an extension notification stays a marked chunk for any other client', async () => {
+  const { proc, updates } = harness()
+  proc.emit({
+    type: 'extension_ui_request',
+    id: 'n1',
+    method: 'notify',
+    message: 'hello'
+  })
+  await tick()
+  const [chunk] = updates()
+  assert.equal(chunk.sessionUpdate, 'agent_message_chunk')
+  assert.equal(chunk.content.text, 'hello')
+  assert.deepEqual(chunk._meta, { piAcp: { notify: { level: 'info' } } })
 })
 
 test("a final retry failure adds no 'resuming' line; a recovery still does", async () => {
@@ -350,8 +421,15 @@ test('steering: pi exiting hands every pending steer back', async () => {
 test('agent: initialize advertises steering and HTTP MCP; _session/steering routes to the session', async () => {
   const conn = new FakeAgentSideConnection()
   const agent = new PiAcpAgent(asAgentConn(conn))
-  const init = await agent.initialize({ protocolVersion: 1 } as any)
+  const init = await agent.initialize({
+    protocolVersion: 1,
+    clientCapabilities: { session: { notices: {}, compaction: {} } }
+  } as any)
   assert.deepEqual((init as any)._meta, { steering: { supported: true } })
+  assert.deepEqual(Reflect.get(agent, 'clientCaps'), {
+    notices: true,
+    compaction: true
+  })
   assert.deepEqual(init.agentCapabilities?.mcpCapabilities, {
     http: true,
     sse: false

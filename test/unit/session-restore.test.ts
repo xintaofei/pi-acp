@@ -47,9 +47,9 @@ test('PiAcpAgent: prompt auto-restores a missing session from SessionStore', asy
     sessionId,
     cwd: params.cwd,
     proc: params.proc,
-    async prompt(message: string, images: unknown[]) {
+    async promptTurn(message: string, images: unknown[]) {
       promptCalls.push({ message, images })
-      return 'end_turn'
+      return { stopReason: 'end_turn', handled: false }
     },
     async cancel() {},
     wasCancelRequested() {

@@ -58,3 +58,49 @@ test('PiAcpAgent: /name sets session display name adapter-side', async () => {
   const last = conn.updates.at(-1)
   assert.match((last as any).update.content.text, /Session name set: My Session/)
 })
+
+function compactHarness(compact: () => Promise<unknown>, compaction: boolean) {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess() as any
+  proc.compact = compact
+  const agent = new PiAcpAgent(asAgentConn(conn))
+  Reflect.set(agent, 'clientCaps', { notices: false, compaction })
+  ;(agent as any).sessions = new FakeSessions({
+    sessionId: 's1',
+    proc,
+    fileCommands: [],
+    publishContextUsage: async () => {}
+  }) as any
+  const run = () =>
+    agent.prompt({
+      sessionId: 's1',
+      prompt: [{ type: 'text', text: '/compact' }]
+    } as any)
+  return { conn, proc, run }
+}
+
+test('PiAcpAgent: /compact that pi refuses is answered, not a failed turn', async () => {
+  const { conn, run } = compactHarness(async () => {
+    throw new Error('pi compact failed: Compaction failed: Nothing to compact (session too small)')
+  }, true)
+
+  const res = await run()
+
+  assert.equal(res.stopReason, 'end_turn')
+  assert.equal(
+    (conn.updates.at(-1) as any).update.content.text,
+    'Compaction failed: Nothing to compact (session too small)'
+  )
+})
+
+test('PiAcpAgent: /compact leaves the summary to the card when the client shows one', async () => {
+  const result = { tokensBefore: 1234, summary: 'The story so far.' }
+  for (const compaction of [true, false]) {
+    const { conn, run } = compactHarness(async () => result, compaction)
+    const res = await run()
+    assert.equal(res.stopReason, 'end_turn')
+    const text: string = (conn.updates.at(-1) as any).update.content.text
+    assert.match(text, /^Compaction completed\.\nTokens before: 1234/)
+    assert.equal(text.includes('The story so far.'), !compaction, `${compaction}`)
+  }
+})

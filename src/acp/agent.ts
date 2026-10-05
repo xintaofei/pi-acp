@@ -25,7 +25,7 @@ import {
 } from '@agentclientprotocol/sdk'
 import { getAuthMethods } from './auth.js'
 import { McpBridgeLaunch, piTooOldMessage, type McpDeliveryReport } from './mcp-bridge.js'
-import { SessionManager, turnError, type PiAcpSession } from './session.js'
+import { SessionManager, turnError, type ClientSessionCaps, type PiAcpSession } from './session.js'
 import { SessionStore } from './session-store.js'
 import { PiRpcProcess } from '../pi-rpc/process.js'
 import { listPiSessions, findPiSession } from './pi-sessions.js'
@@ -153,6 +153,9 @@ export class PiAcpAgent implements ACPAgent {
   // Remember recent session cwd and use it as the default filter.
   private lastSessionCwd: string | null = null
 
+  // What `initialize` advertised (see `ClientSessionCaps`).
+  private clientCaps: ClientSessionCaps = { notices: false, compaction: false }
+
   constructor(conn: AgentSideConnection, _config?: unknown) {
     this.conn = conn
     void _config
@@ -247,7 +250,8 @@ export class PiAcpAgent implements ACPAgent {
         conn: this.conn,
         proc,
         fileCommands,
-        mcpDelivery
+        mcpDelivery,
+        clientCaps: this.clientCaps
       })
 
       this.lastSessionCwd = cwd
@@ -269,6 +273,14 @@ export class PiAcpAgent implements ACPAgent {
     // We currently only support ACP protocol version 1.
     const supportedVersion = 1
     const requested = params.protocolVersion
+
+    // The unstable session extensions the client implements; each replaces a
+    // fallback, so it is only used when asked for (an object = advertised).
+    const session = (params.clientCapabilities as any)?.session
+    this.clientCaps = {
+      notices: typeof session?.notices === 'object' && session.notices !== null,
+      compaction: typeof session?.compaction === 'object' && session.compaction !== null
+    }
 
     return {
       protocolVersion: requested === supportedVersion ? requested : supportedVersion,
@@ -324,7 +336,8 @@ export class PiAcpAgent implements ACPAgent {
       mcpServers: params.mcpServers,
       conn: this.conn,
       fileCommands,
-      piCommand: process.env.PI_ACP_PI_COMMAND
+      piCommand: process.env.PI_ACP_PI_COMMAND,
+      clientCaps: this.clientCaps
     })
 
     // Fetch state + models once (parallel) to reduce startup latency.
@@ -474,7 +487,27 @@ export class PiAcpAgent implements ACPAgent {
 
       if (cmd === 'compact') {
         const customInstructions = args.join(' ').trim() || undefined
-        const res = await session.proc.compact(customInstructions)
+        let res: unknown
+        try {
+          res = await session.proc.compact(customInstructions)
+        } catch (e: any) {
+          // pi refusing ("Nothing to compact (session too small)") or failing is
+          // the command's answer, not a broken turn. A client with the
+          // compaction extension also has the failed card.
+          await session.publishContextUsage()
+          // pi's message already reads "Compaction failed: …".
+          const reason = String(e?.message ?? e)
+            .replace(/^pi compact failed: /, '')
+            .replace(/^Compaction failed:\s*/i, '')
+          await this.conn.sessionUpdate({
+            sessionId: session.sessionId,
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: `Compaction failed: ${reason}` }
+            }
+          })
+          return { stopReason: 'end_turn' }
+        }
 
         const r: any = res && typeof res === 'object' ? (res as any) : null
         const tokensBefore = typeof r?.tokensBefore === 'number' ? r.tokensBefore : null
@@ -485,8 +518,12 @@ export class PiAcpAgent implements ACPAgent {
           tokensBefore !== null ? `Tokens before: ${tokensBefore}` : null
         ].filter(Boolean)
 
-        const text = headerLines.join('\n') + (summary ? `\n\n${summary}` : '')
+        // The compaction card (when the client takes `compaction_update`)
+        // already carries the summary; repeating it here would print it twice.
+        const text = headerLines.join('\n') + (summary && !this.clientCaps.compaction ? `\n\n${summary}` : '')
 
+        // The card's frames are queued on the session; land them first.
+        await session.publishContextUsage()
         await this.conn.sessionUpdate({
           sessionId: session.sessionId,
           update: {
@@ -906,9 +943,13 @@ export class PiAcpAgent implements ACPAgent {
     }
 
     // A failed turn rejects (with pi's own error text); see PiAcpSession.resolveTurn.
-    const stopReason: StopReason = await session.prompt(message, images)
+    const turn = await session.promptTurn(message, images)
+    const stopReason: StopReason = turn.stopReason
 
-    return { stopReason }
+    // A prompt pi handled without a run (an extension command, an input
+    // handler) ends with no reply by design; say so, so a client that treats a
+    // reply-less turn as a swallowed request can tell the two apart.
+    return turn.handled ? { stopReason, _meta: { piAcp: { disposition: 'handled' } } } : { stopReason }
   }
 
   async cancel(params: CancelNotification): Promise<void> {
