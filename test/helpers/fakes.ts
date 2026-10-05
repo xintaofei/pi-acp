@@ -68,6 +68,8 @@ export class FakePiRpcProcess {
   }
   /** Call order of `clearQueue` / `abort`, to check cancel sequencing. */
   readonly controlCalls: string[] = []
+  /** Every prompt / steer / clearQueue / abort, in the order they reached pi. */
+  readonly callLog: string[] = []
 
   onEvent(handler: (ev: PiRpcEvent) => void): () => void {
     this.handlers.push(handler)
@@ -105,6 +107,7 @@ export class FakePiRpcProcess {
 
   async prompt(message: string, attachments: unknown[] = []): Promise<PromptDisposition | undefined> {
     this.prompts.push({ message, attachments })
+    this.callLog.push(`prompt:${message}`)
     if (this.promptGate) await this.promptGate
     if (this.promptError) throw this.promptError
     return this.promptDisposition
@@ -112,6 +115,7 @@ export class FakePiRpcProcess {
 
   async steer(message: string, images: unknown[] = []): Promise<QueuedInputDisposition | undefined> {
     this.steers.push({ message, images })
+    this.callLog.push(`steer:${message}`)
     if (this.holdSteers) return new Promise((resolve, reject) => this.heldSteers.push({ resolve, reject }))
     return this.steerDisposition
   }
@@ -119,6 +123,7 @@ export class FakePiRpcProcess {
   async clearQueue(): Promise<{ steering: string[]; followUp: string[] }> {
     this.clearQueueCount += 1
     this.controlCalls.push('clearQueue')
+    this.callLog.push('clearQueue')
     const cleared = this.clearQueueResult
     this.clearQueueResult = { steering: [], followUp: [] }
     // pi reports its emptied queues before it answers.
@@ -129,6 +134,7 @@ export class FakePiRpcProcess {
   async abort(): Promise<void> {
     this.abortCount += 1
     this.controlCalls.push('abort')
+    this.callLog.push('abort')
   }
 
   dispose() {}

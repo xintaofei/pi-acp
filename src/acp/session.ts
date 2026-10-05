@@ -104,26 +104,6 @@ type QueuedTurn = {
 /** A steer pi took into its queue during the current turn, as it was sent. */
 type AcceptedSteer = { text: string; images: unknown[] }
 
-/**
- * How long settling or cancelling a turn waits for pi to answer a steer still
- * in flight. pi answers once its input handlers ran — normally at once; the
- * bound only keeps an extension that never returns from holding the turn.
- */
-const STEER_ANSWER_WAIT_MS = 5_000
-
-/** Wait for `promises` to settle, for at most `ms`. */
-function settledWithin(promises: Iterable<Promise<unknown>>, ms: number): Promise<void> {
-  const pending = [...promises]
-  if (!pending.length) return Promise.resolve()
-  let timer: ReturnType<typeof setTimeout> | undefined
-  return Promise.race([
-    Promise.allSettled(pending).then(() => undefined),
-    new Promise<void>(resolve => {
-      timer = setTimeout(resolve, ms)
-    })
-  ]).finally(() => clearTimeout(timer))
-}
-
 type PermissionResponse = Awaited<ReturnType<AgentSideConnection['requestPermission']>>
 
 const CONFIRM_PERMISSION_OPTIONS: PermissionOption[] = [
@@ -569,6 +549,37 @@ export class PiAcpSession {
     }
   }
 
+  /**
+   * Wait until pi answered every steer sent for `turn`. Not time-bound on
+   * purpose: one answered after its turn ended would be lost or land in the
+   * next turn, and the client is holding its connection for that answer anyway.
+   */
+  private async steersAnswered(turn: PendingTurn): Promise<void> {
+    await Promise.allSettled([...turn.inflightSteers])
+  }
+
+  /**
+   * pi delivers queued steering in order and drops each message's text from
+   * its queue as it does; drop the same record here, so the turn's records are
+   * always the steers still waiting (two with the same text keep their order,
+   * and each keeps its own images).
+   */
+  private forgetDeliveredSteers(before: string[], after: string[]): void {
+    const steers = this.pendingTurn?.steers
+    if (!steers?.length) return
+    const left = new Map<string, number>()
+    for (const text of after) left.set(text, (left.get(text) ?? 0) + 1)
+    for (const text of before) {
+      const count = left.get(text) ?? 0
+      if (count > 0) {
+        left.set(text, count - 1)
+        continue
+      }
+      const index = steers.findIndex(s => s.text === text)
+      if (index !== -1) steers.splice(index, 1)
+    }
+  }
+
   /** Whether pi's queues, as last reported, still hold a message. */
   private piQueueHoldsMessages(): boolean {
     return [...this.piQueue.steering, ...this.piQueue.followUp].some(t => t.trim())
@@ -581,7 +592,7 @@ export class PiAcpSession {
    */
   private async dropLeftoverSteers(turn: PendingTurn): Promise<void> {
     if (!turn.steers.length && !turn.inflightSteers.size) return
-    await settledWithin(turn.inflightSteers, STEER_ANSWER_WAIT_MS)
+    await this.steersAnswered(turn)
     if (!turn.steers.length) return
     turn.steers = []
     if (!this.piQueueHoldsMessages()) return
@@ -679,7 +690,7 @@ export class PiAcpSession {
     try {
       // A steer pi answers only now reached it after the run's last look at
       // its queue; wait for it so the check below sees it.
-      await settledWithin(turn.inflightSteers, STEER_ANSWER_WAIT_MS)
+      await this.steersAnswered(turn)
       if (!this.cancelRequested && this.pendingTurn === turn) continued = await this.continueWithLeftoverSteers(turn)
       if (!continued) {
         turn.steers = []
@@ -708,24 +719,27 @@ export class PiAcpSession {
    */
   private async continueWithLeftoverSteers(turn: PendingTurn): Promise<boolean> {
     if (!turn.steers.length || !this.piQueueHoldsMessages()) return false
+    // The steers still waiting, taken before the clear: pi reports its emptied
+    // queue first, which would otherwise read as their delivery.
+    const waiting = [...turn.steers]
     let cleared: { steering: string[]; followUp: string[] }
     try {
       cleared = await this.proc.clearQueue()
     } catch {
       return false
     }
+    turn.steers = []
     const texts = [...cleared.steering, ...cleared.followUp].filter(t => t.trim())
     if (!texts.length || this.pendingTurn !== turn) return false
 
     // pi hands back text only; the images come from what was sent.
     const images: unknown[] = []
     for (const text of texts) {
-      const index = turn.steers.findIndex(s => s.text === text)
+      const index = waiting.findIndex(s => s.text === text)
       if (index === -1) continue
-      images.push(...turn.steers[index].images)
-      turn.steers.splice(index, 1)
+      images.push(...waiting[index].images)
+      waiting.splice(index, 1)
     }
-    turn.steers = []
     turn.handled = false
     this.inAgentLoop = false
     this.runPrompt(turn, texts.join('\n\n'), images)
@@ -901,26 +915,38 @@ export class PiAcpSession {
       })
       .catch(err => {
         // The prompt was rejected before pi accepted it (no model, bad config...).
-        void this.flushEmits().finally(() => {
-          if (this.pendingTurn !== turn) return
-          this.pendingTurn = null
-          this.inAgentLoop = false
-          // Steers pi took for a run that never started.
-          void this.dropLeftoverSteers(turn)
-
-          if (this.cancelRequested) {
-            turn.resolve(outcome('cancelled'))
-          } else {
-            // Auth/config issues surface as AUTH_REQUIRED so clients can offer a login.
-            const authErr = maybeAuthRequiredError(err)
-            turn.reject(authErr ?? turnError(String((err as Error)?.message ?? err)))
-          }
-
-          // A prompt queued behind this one gets its own answer from pi rather
-          // than waiting forever.
-          this.startNextQueued()
-        })
+        void this.flushEmits().finally(() => this.endRefusedTurn(turn, err))
       })
+  }
+
+  /** pi refused `turn`'s prompt: fail the turn, take back its steers, go on. */
+  private async endRefusedTurn(turn: PendingTurn, err: unknown): Promise<void> {
+    if (this.pendingTurn !== turn) return
+    if (this.cancelRequested) {
+      turn.resolve(outcome('cancelled'))
+    } else {
+      // Auth/config issues surface as AUTH_REQUIRED so clients can offer a login.
+      const authErr = maybeAuthRequiredError(err)
+      turn.reject(authErr ?? turnError(String((err as Error)?.message ?? err)))
+    }
+
+    // The turn stays this session's (ending) until pi gave back the steers it
+    // took for the run that never started: a prompt arriving meanwhile queues
+    // behind it, and no run may start while pi still holds them — it would
+    // deliver them first thing.
+    this.settling = true
+    try {
+      await this.dropLeftoverSteers(turn)
+    } finally {
+      this.settling = false
+    }
+    if (this.pendingTurn !== turn) return
+    this.pendingTurn = null
+    this.inAgentLoop = false
+
+    // A prompt queued behind this one gets its own answer from pi rather than
+    // waiting forever.
+    this.startNextQueued()
   }
 
   private emitToolCallStart(params: {
@@ -1003,10 +1029,12 @@ export class PiAcpSession {
 
       case 'queue_update': {
         const texts = (v: unknown) => (Array.isArray(v) ? v.filter((t): t is string => typeof t === 'string') : [])
-        this.piQueue = {
+        const next = {
           steering: texts((ev as any).steering),
           followUp: texts((ev as any).followUp)
         }
+        this.forgetDeliveredSteers(this.piQueue.steering, next.steering)
+        this.piQueue = next
         break
       }
 

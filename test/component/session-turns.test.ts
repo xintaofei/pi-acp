@@ -514,11 +514,32 @@ test('a refused prompt takes back the steers pi took for it, and starts the next
   const second = assert.rejects(session.prompt('second'), /No model selected/)
   release()
   await assert.rejects(first, /No model selected/)
-  await tick()
-  assert.equal(proc.clearQueueCount, 1)
-  // The prompt queued behind it is not stranded: it gets pi's own answer.
-  assert.equal(proc.prompts.at(-1)?.message, 'second')
   await second
+  // The prompt queued behind it is not stranded: it gets pi's own answer —
+  // and only once pi gave back the steer, which its run would deliver first.
+  assert.deepEqual(proc.callLog, ['prompt:first', 'steer:for first', 'clearQueue', 'prompt:second'])
+})
+
+test('steering: two steers with the same text keep their own images', async () => {
+  const { proc, session } = harness()
+  const turn = session.prompt('work')
+  await tick()
+  const a = { type: 'image', data: 'AAA', mimeType: 'image/png' }
+  const b = { type: 'image', data: 'BBB', mimeType: 'image/png' }
+  assert.equal(await session.steer('look', [a]), 'injected')
+  proc.emit({ type: 'queue_update', steering: ['look'], followUp: [] })
+  assert.equal(await session.steer('look', [b]), 'injected')
+  proc.emit({ type: 'queue_update', steering: ['look', 'look'], followUp: [] })
+  // pi delivers the first one; the second is still waiting when the run ends.
+  proc.emit({ type: 'queue_update', steering: ['look'], followUp: [] })
+  proc.clearQueueResult = { steering: ['look'], followUp: [] }
+  proc.emit(assistantEnd('stop'))
+  proc.emit({ type: 'agent_settled' })
+  await tick()
+  assert.deepEqual(proc.prompts.at(-1), { message: 'look', attachments: [b] })
+  proc.emit(assistantEnd('stop'))
+  proc.emit({ type: 'agent_settled' })
+  assert.equal(await turn, 'end_turn')
 })
 
 test('cancelled while pi was still preparing the prompt: the run is aborted once it starts', async () => {
