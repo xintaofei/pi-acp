@@ -30,6 +30,13 @@ requireFilled('repository.url', pkg.repository?.url, URL_PLACEHOLDER)
 requireFilled('homepage', pkg.homepage, URL_PLACEHOLDER)
 requireFilled('bugs.url', pkg.bugs?.url, URL_PLACEHOLDER)
 
+// npm publishes a scoped package as restricted unless told otherwise: the first
+// publish then fails with 402, or, on an account that has private packages,
+// ships a package nobody else can install.
+if (pkg.name?.startsWith('@') && pkg.publishConfig?.access !== 'public') {
+  problems.push(`${pkg.name} is scoped: publishConfig.access must be "public"`)
+}
+
 // npm adds LICENSE to the tarball only when it exists; MIT without its text grants nothing.
 if (!existsSync(new URL('LICENSE', root))) problems.push('LICENSE is missing')
 
@@ -44,7 +51,7 @@ for (const entry of pkg.files ?? []) {
 for (const [label, rel] of [
   ['main', pkg.main],
   ...Object.entries(pkg.bin ?? {}).map(([name, path]) => [`bin.${name}`, path]),
-  ['pi extension', 'dist/codeg-bridge.mjs']
+  ['pi extension', 'dist/mcp-bridge.mjs']
 ]) {
   if (rel && !existsSync(new URL(rel, root)))
     problems.push(`${label} points at ${rel}, which does not exist (npm run build)`)

@@ -629,7 +629,7 @@ test('agent: initialize advertises steering and HTTP MCP; _session/steering rout
     http: true,
     sse: false
   })
-  assert.equal(init.agentInfo?.name, 'codeg-pi-acp')
+  assert.equal(init.agentInfo?.name, 'pi-acp')
 
   // No such session: the content stays the client's.
   assert.deepEqual(

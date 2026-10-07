@@ -11,7 +11,7 @@ import {
   toBridgeServers,
   type BridgeConfig
 } from '../../src/acp/mcp-bridge.js'
-import codegBridge from '../../src/pi-extension/codeg-bridge.js'
+import mcpBridge from '../../src/pi-extension/mcp-bridge.js'
 
 afterEach(() => {
   delete process.env[BRIDGE_CONFIG_ENV]
@@ -143,7 +143,7 @@ test('piTooOldMessage carries the stable marker', () => {
   assert.ok(piTooOldMessage().startsWith(PI_TOO_OLD_MARKER))
 })
 
-test('codeg bridge extension: registers, reports, and leaves nothing behind', () => {
+test('MCP bridge extension: registers, reports, and leaves nothing behind', () => {
   const launch = McpBridgeLaunch.prepare([
     { name: 'ok', command: 'x', args: [], env: [] },
     { name: 'bad', command: 'y', args: [], env: [] }
@@ -152,7 +152,7 @@ test('codeg bridge extension: registers, reports, and leaves nothing behind', ()
   process.env[BRIDGE_CONFIG_ENV] = configPath
   const registered: Array<{ name: string; config: unknown }> = []
 
-  codegBridge({
+  mcpBridge({
     registerMcpServer(name: string, config: unknown) {
       if (name === 'bad') throw new Error('invalid config')
       registered.push({ name, config })
@@ -172,16 +172,16 @@ test('codeg bridge extension: registers, reports, and leaves nothing behind', ()
   assert.deepEqual(outcome.report?.skipped, [{ name: 'bad', reason: 'invalid config' }])
 })
 
-test('codeg bridge extension: a pi without registerMcpServer is reported unsupported', () => {
+test('MCP bridge extension: a pi without registerMcpServer is reported unsupported', () => {
   const launch = McpBridgeLaunch.prepare([])
   process.env[BRIDGE_CONFIG_ENV] = launch.env[BRIDGE_CONFIG_ENV]
-  codegBridge({})
+  mcpBridge({})
   assert.deepEqual(launch.collect(), { report: null, piSupportsMcp: false })
 })
 
-test('codeg bridge extension: without the env var it does nothing', () => {
+test('MCP bridge extension: without the env var it does nothing', () => {
   let called = false
-  codegBridge({
+  mcpBridge({
     registerMcpServer() {
       called = true
     }

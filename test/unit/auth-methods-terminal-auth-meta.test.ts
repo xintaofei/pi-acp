@@ -16,13 +16,13 @@ test('getAuthMethods: includes Zed terminal-auth metadata when enabled', () => {
   assert.equal(m._meta['terminal-auth'].label, 'Launch pi')
 })
 
-test('getAuthMethods: terminal-auth relaunches the codeg-pi-acp bin when not started as a .js file', () => {
+test('getAuthMethods: terminal-auth relaunches the pi-acp bin when not started as a .js file', () => {
   const argv = process.argv
   // What a global npm install looks like on macOS/Linux: the bin is a symlink without .js.
-  process.argv = ['/usr/local/bin/node', '/usr/local/bin/codeg-pi-acp']
+  process.argv = ['/usr/local/bin/node', '/usr/local/bin/pi-acp']
   try {
     const m: any = getAuthMethods({ supportsTerminalAuthMeta: true })[0]
-    assert.equal(m._meta['terminal-auth'].command, 'codeg-pi-acp')
+    assert.equal(m._meta['terminal-auth'].command, 'pi-acp')
     assert.deepEqual(m._meta['terminal-auth'].args, ['--terminal-login'])
   } finally {
     process.argv = argv

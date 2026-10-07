@@ -55,10 +55,13 @@ credential at run time, npm accepts it for this repository's `release.yml`, and 
 One-time setup:
 
 1. **Publish the first version by hand.** npm only offers trusted-publisher settings for a package that already
-   exists. Run `npm run format:check && npm run smoke:packed`, then `npm publish` while logged in with 2FA;
-   `prepublishOnly` builds and runs the preflight, typecheck, lint and tests before anything is uploaded.
-2. On npmjs.com, open the package's **Settings → Trusted Publisher → GitHub Actions**. Set the user to `xintaofei`,
-   the repository to `pi-acp` and the workflow filename to `release.yml`. Leave Environment empty.
+   exists. The package is `@spacering/pi-acp`, so log in to npm as `spacering` (with 2FA). Run
+   `npm run format:check && npm run smoke:packed`, then `npm publish`; `prepublishOnly` builds and runs the preflight,
+   typecheck, lint and tests before anything is uploaded. `publishConfig.access` is `public`: npm would otherwise
+   publish a scoped package as restricted.
+2. On npmjs.com, open `@spacering/pi-acp`'s **Settings → Trusted Publisher → GitHub Actions**. Set the user to
+   `xintaofei` (the GitHub owner of this repository), the repository to `pi-acp` and the workflow filename to
+   `release.yml`. Leave Environment empty.
 3. Under **Settings → Publishing access**, choose "Require two-factor authentication and disallow tokens". From then
    on, unattended publishing goes only through `release.yml`.
 
@@ -68,5 +71,5 @@ Points that cost time when they go wrong:
   publishing fail with an authentication error that does not say why.
 - **`repository.url` in `package.json` must match this GitHub repository exactly**, or no provenance attestation is
   generated.
-- **codeg pins an exact version** of this package (`AgentType::Pi` in codeg's `src-tauri/src/acp/registry.rs`).
+- **codeg pins an exact version** of `@spacering/pi-acp` (`AgentType::Pi` in codeg's `src-tauri/src/acp/registry.rs`).
   Publishing does not change what codeg installs. Bump that pin in codeg after a release has been checked there.

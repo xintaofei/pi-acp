@@ -1,7 +1,7 @@
 {
-  "name": "codeg-pi-acp",
+  "name": "@spacering/pi-acp",
   "version": "0.1.0",
-  "description": "Agent Client Protocol adapter for the pi coding agent, maintained for codeg (a fork of pi-acp)",
+  "description": "ACP adapter for the pi coding agent: a fork of pi-acp for pi 1.0, maintained for codeg",
   "license": "MIT",
   "author": "xintaofei",
   "contributors": [
@@ -12,7 +12,8 @@
     "url": "git+https://github.com/xintaofei/pi-acp.git"
   },
   "publishConfig": {
-    "registry": "https://registry.npmjs.org/"
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
   },
   "bugs": {
     "url": "https://github.com/xintaofei/pi-acp/issues"
@@ -31,7 +32,7 @@
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "codeg-pi-acp": "dist/index.js"
+    "pi-acp": "dist/index.js"
   },
   "files": [
     "dist"

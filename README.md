@@ -1,6 +1,6 @@
-# codeg-pi-acp
+# pi-acp
 
-[![npm version](https://img.shields.io/npm/v/codeg-pi-acp)](https://www.npmjs.com/package/codeg-pi-acp)
+[![npm version](https://img.shields.io/npm/v/@spacering/pi-acp)](https://www.npmjs.com/package/@spacering/pi-acp)
 [![CI status](https://github.com/xintaofei/pi-acp/actions/workflows/ci.yml/badge.svg)](https://github.com/xintaofei/pi-acp/actions/workflows/ci.yml)
 
 An [Agent Client Protocol](https://agentclientprotocol.com) (ACP) adapter for the
@@ -8,9 +8,10 @@ An [Agent Client Protocol](https://agentclientprotocol.com) (ACP) adapter for th
 between pi's RPC records and ACP over stdio.
 
 It is the adapter behind **[codeg](https://github.com/xintaofei/codeg)**'s Pi agent and works with any ACP client.
-It is a fork of [svkozak/pi-acp](https://github.com/svkozak/pi-acp) 0.0.34 (MIT), brought up to pi 1.0. This
-repository keeps upstream's history, layout (`src/pi-rpc/` talks to pi, `src/acp/` speaks ACP) and formatting, so
-upstream changes can still be merged.
+It is a fork of [svkozak/pi-acp](https://github.com/svkozak/pi-acp) 0.0.34 (MIT), brought up to pi 1.0, and is
+published to npm as **`@spacering/pi-acp`**. Its command is `pi-acp`, the same as upstream's. This repository keeps
+upstream's history, layout (`src/pi-rpc/` talks to pi, `src/acp/` speaks ACP) and formatting, so upstream changes can
+still be merged.
 
 ## Requirements
 
@@ -20,7 +21,7 @@ upstream changes can still be merged.
   npm install -g @earendil-works/pi-coding-agent
   ```
 
-  An older pi is refused when a session opens, with a message starting `pi runtime is too old for codeg-pi-acp`.
+  An older pi is refused when a session opens, with a message starting `pi runtime is too old for pi-acp`.
 
 - **Node.js 22.19 or newer** (pi's own minimum).
 
@@ -28,33 +29,37 @@ upstream changes can still be merged.
 
 ### codeg
 
-codeg installs and updates this adapter for its Pi agent. There is nothing to configure.
+codeg installs and updates this adapter for its Pi agent, replacing upstream's `pi-acp` that earlier codeg versions
+installed. There is nothing to configure.
 
 ### Zed or another ACP client
 
 ```bash
-npm install -g codeg-pi-acp
+npm install -g @spacering/pi-acp
 ```
+
+It installs the same `pi-acp` command as upstream's `pi-acp` package, so npm will not install both globally: run
+`npm uninstall -g pi-acp` first if you have upstream's.
 
 ```json
   "agent_servers": {
     "pi": {
       "type": "custom",
-      "command": "codeg-pi-acp",
+      "command": "pi-acp",
       "args": [],
       "env": {}
     }
   }
 ```
 
-Or without a global install: `"command": "npx", "args": ["-y", "codeg-pi-acp"]`.
+Or without a global install: `"command": "npx", "args": ["-y", "@spacering/pi-acp"]`.
 
-`codeg-pi-acp --version` prints the adapter's version.
+`pi-acp --version` prints the adapter's version.
 
 ## What differs from upstream
 
 - **MCP reaches pi.** The `mcpServers` of `session/new` and `session/load` are handed to pi's native MCP (pi 0.99+) by
-  a small pi extension (`src/pi-extension/codeg-bridge.ts`, built to `dist/codeg-bridge.mjs` and loaded with `pi -e`)
+  a small pi extension (`src/pi-extension/mcp-bridge.ts`, built to `dist/mcp-bridge.mjs` and loaded with `pi -e`)
   that calls `pi.registerMcpServer()` with `exposure: "direct"`. The servers travel in a private file the extension
   deletes, and `env` / `headers` values are escaped so pi does not run `!command` or interpolate `$VAR` in them. stdio
   and streamable HTTP servers are supported; SSE servers are reported as skipped (pi rejects them). The response's
@@ -104,7 +109,7 @@ Or without a global install: `"command": "npx", "args": ["-y", "codeg-pi-acp"]`.
 The agent advertises Terminal Auth. A client such as Zed shows an **Authenticate** button that runs:
 
 ```bash
-codeg-pi-acp --terminal-login
+pi-acp --terminal-login
 ```
 
 which starts pi interactively so you can log in or set API keys.
@@ -132,4 +137,4 @@ npm run smoke:packed   # pack, install the tarball, and initialize the installed
 
 ## License
 
-MIT, see [LICENSE](LICENSE). Copyright Sergii Kozak (upstream pi-acp) and the codeg-pi-acp contributors.
+MIT, see [LICENSE](LICENSE). Copyright Sergii Kozak (upstream pi-acp) and the @spacering/pi-acp contributors.

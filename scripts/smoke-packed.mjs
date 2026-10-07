@@ -1,8 +1,8 @@
 // Packs the package exactly as `npm publish` would, installs the tarball
 // globally into a throwaway prefix, and talks ACP to the installed adapter.
 // A file missing from `files`, a wrong `bin`/entry path, a dependency left out
-// of `dependencies` or a version that `initialize` misreports fails here, before
-// anything reaches npm. Needs no pi: `initialize` does not start it.
+// of `dependencies`, or a name or version that `initialize` misreports fails
+// here, before anything reaches npm. Needs no pi: `initialize` does not start it.
 import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -10,7 +10,7 @@ import { join } from 'node:path'
 
 const root = new URL('../', import.meta.url)
 const pkg = JSON.parse(readFileSync(new URL('package.json', root), 'utf8'))
-const work = mkdtempSync(join(tmpdir(), 'codeg-pi-acp-pack-'))
+const work = mkdtempSync(join(tmpdir(), 'pi-acp-pack-'))
 
 const win = process.platform === 'win32'
 
@@ -41,7 +41,7 @@ try {
   npm(['install', '--global', '--prefix', prefix, '--no-audit', '--no-fund', join(work, filename)])
   const installed = join(npm(['root', '--global', '--prefix', prefix]), pkg.name)
 
-  for (const rel of ['package.json', 'LICENSE', 'README.md', ...Object.values(pkg.bin), 'dist/codeg-bridge.mjs']) {
+  for (const rel of ['package.json', 'LICENSE', 'README.md', ...Object.values(pkg.bin), 'dist/mcp-bridge.mjs']) {
     if (!existsSync(join(installed, rel))) fail(`the packed package has no ${rel}`)
   }
 
@@ -59,12 +59,15 @@ try {
     fail(`--version printed ${JSON.stringify(version.stdout)} ${version.error ?? version.stderr ?? ''}`)
   }
 
+  // The adapter names itself after its command, not the (scoped) package.
   const info = await initialize(command)
-  if (info?.name !== pkg.name || info?.version !== pkg.version) {
+  if (info?.name !== binName || info?.version !== pkg.version) {
     fail(`initialize reported agentInfo ${JSON.stringify(info)}`)
   }
   if (!process.exitCode)
-    console.log(`smoke-packed: ${filename} installs and answers initialize as ${pkg.name}@${pkg.version}`)
+    console.log(
+      `smoke-packed: ${filename} installs \`${binName}\`, which answers initialize as ${binName} ${pkg.version}`
+    )
 } finally {
   rmSync(work, { recursive: true, force: true })
 }

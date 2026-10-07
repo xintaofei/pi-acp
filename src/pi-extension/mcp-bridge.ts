@@ -1,9 +1,9 @@
 /**
- * pi extension loaded by codeg-pi-acp with `pi -e <this file>`.
+ * pi extension loaded by pi-acp with `pi -e <this file>`.
  *
  * It registers the ACP session's MCP servers with pi's native MCP support
  * (`pi.registerMcpServer`, pi 0.99+). The adapter passes them through a private
- * file named by `CODEG_PI_ACP_BRIDGE_CONFIG`; this extension removes the env var
+ * file named by `PI_ACP_BRIDGE_CONFIG`; this extension removes the env var
  * before anything can inherit it, deletes the file, and writes a status report
  * the adapter reads back once pi answered its first RPC.
  *
@@ -12,7 +12,7 @@
  */
 import { readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 
-const CONFIG_ENV = 'CODEG_PI_ACP_BRIDGE_CONFIG'
+const CONFIG_ENV = 'PI_ACP_BRIDGE_CONFIG'
 
 type BridgeConfig = {
   version?: number
@@ -24,7 +24,7 @@ type PiExtensionApi = {
   registerMcpServer?: (name: string, config: unknown) => void
 }
 
-export default function codegBridge(pi: PiExtensionApi): void {
+export default function mcpBridge(pi: PiExtensionApi): void {
   const configPath = process.env[CONFIG_ENV]
   delete process.env[CONFIG_ENV]
   if (!configPath) return

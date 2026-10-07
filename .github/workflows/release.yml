@@ -82,7 +82,8 @@ jobs:
 
       # `prepublishOnly` runs the gates again, on purpose: it also guards a
       # publish by hand. No --provenance (OIDC publishing attests by itself) and
-      # no --access public (an unscoped package is public).
+      # no --access public (package.json's publishConfig has it; the package is
+      # scoped, which npm would otherwise publish as restricted).
       - run: npm publish
 
       - name: Create GitHub Release

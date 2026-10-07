@@ -9,8 +9,8 @@ import { fileURLToPath } from 'node:url'
  *
  * pi (0.99+) has native MCP, but its only ways in are `mcp.json` files it reads
  * itself and `pi.registerMcpServer()` from an extension. The adapter therefore
- * loads a tiny bundled extension (`codeg-bridge.mjs`, see
- * `src/pi-extension/codeg-bridge.ts`) with `-e`, and passes it the servers
+ * loads a tiny bundled extension (`mcp-bridge.mjs`, see
+ * `src/pi-extension/mcp-bridge.ts`) with `-e`, and passes it the servers
  * through a private file: the path goes in an env var the extension deletes on
  * load, and the extension unlinks the file after reading it. An env var holding
  * the servers themselves would be inherited by every bash command and MCP
@@ -22,10 +22,10 @@ import { fileURLToPath } from 'node:url'
  */
 
 /** Env var naming the bridge config file for the pi child. */
-export const BRIDGE_CONFIG_ENV = 'CODEG_PI_ACP_BRIDGE_CONFIG'
+export const BRIDGE_CONFIG_ENV = 'PI_ACP_BRIDGE_CONFIG'
 
 /** Test/dev override for the extension's location. */
-const BRIDGE_EXTENSION_ENV = 'CODEG_PI_ACP_BRIDGE_EXTENSION'
+const BRIDGE_EXTENSION_ENV = 'PI_ACP_BRIDGE_EXTENSION'
 
 export type PiMcpServerConfig =
   | {
@@ -169,7 +169,7 @@ export function toBridgeServers(servers: McpServer[] | undefined): {
 export function bridgeExtensionPath(): string {
   const override = process.env[BRIDGE_EXTENSION_ENV]
   if (override) return override
-  return fileURLToPath(new URL('./codeg-bridge.mjs', import.meta.url))
+  return fileURLToPath(new URL('./mcp-bridge.mjs', import.meta.url))
 }
 
 /**
@@ -182,7 +182,7 @@ export const MIN_PI_VERSION = '0.99.0'
  * Stable marker in the error a session open fails with on an older pi, so a
  * client can recognize it (codeg maps it to "update pi" with a settings link).
  */
-export const PI_TOO_OLD_MARKER = 'pi runtime is too old for codeg-pi-acp'
+export const PI_TOO_OLD_MARKER = 'pi runtime is too old for pi-acp'
 
 export function piTooOldMessage(): string {
   return (
@@ -222,7 +222,7 @@ export class McpBridgeLaunch {
 
   static prepare(servers: McpServer[] | undefined): McpBridgeLaunch {
     const { servers: bridged, skipped } = toBridgeServers(servers)
-    const dir = mkdtempSync(join(tmpdir(), 'codeg-pi-acp-'))
+    const dir = mkdtempSync(join(tmpdir(), 'pi-acp-bridge-'))
     const configPath = join(dir, 'bridge.json')
     const statusPath = join(dir, 'status.json')
     const config: BridgeConfig = { version: 1, servers: bridged, statusPath }

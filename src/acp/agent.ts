@@ -118,14 +118,14 @@ function mergeCommands(a: AvailableCommand[], b: AvailableCommand[]): AvailableC
 }
 import { fileURLToPath } from 'node:url'
 
-declare const __CODEG_PI_ACP_VERSION__: string | undefined
+declare const __PI_ACP_VERSION__: string | undefined
 
 const pkg = readNearestPackageJson(import.meta.url)
 
 /** The adapter's own name and version, as `initialize` reports them. */
-export const ADAPTER_NAME = 'codeg-pi-acp'
+export const ADAPTER_NAME = 'pi-acp'
 export const ADAPTER_VERSION: string =
-  typeof __CODEG_PI_ACP_VERSION__ === 'string' ? __CODEG_PI_ACP_VERSION__ : (pkg.version ?? '0.0.0')
+  typeof __PI_ACP_VERSION__ === 'string' ? __PI_ACP_VERSION__ : (pkg.version ?? '0.0.0')
 
 /** `_meta.piAcp` of a session/new or session/load response. */
 function sessionMeta(mcp: McpDeliveryReport | null | undefined): Record<string, unknown> {
@@ -286,7 +286,7 @@ export class PiAcpAgent implements ACPAgent {
       protocolVersion: requested === supportedVersion ? requested : supportedVersion,
       agentInfo: {
         name: ADAPTER_NAME,
-        title: 'pi ACP adapter (codeg)',
+        title: 'pi ACP adapter',
         version: ADAPTER_VERSION
       },
       // Zed currently uses ClientCapabilities._meta["terminal-auth"] to decide whether to show

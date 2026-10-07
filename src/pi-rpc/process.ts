@@ -134,7 +134,7 @@ export type SpawnParams = {
   piCommand?: string
   /** If set, pi will persist the session to this exact file (via `--session <path>`). */
   sessionPath?: string
-  /** Extensions to load explicitly (`-e <path>`), e.g. the codeg bridge. */
+  /** Extensions to load explicitly (`-e <path>`), e.g. the MCP bridge. */
   extensions?: string[]
   /** Extra environment for the pi child only. */
   env?: Record<string, string>

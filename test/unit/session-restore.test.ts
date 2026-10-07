@@ -8,14 +8,14 @@ import { PiRpcProcess } from '../../src/pi-rpc/process.js'
 import { FakeAgentSideConnection, asAgentConn } from '../helpers/fakes.js'
 
 /**
- * Every launch loads the codeg bridge extension (it also proves the pi
+ * Every launch loads the MCP bridge extension (it also proves the pi
  * version); check that part, then compare the rest of the spawn parameters.
  */
 function withoutBridge(calls: any[]): any[] {
   return calls.map(({ extensions, env, ...rest }) => {
     assert.equal(extensions.length, 1)
-    assert.match(extensions[0], /codeg-bridge\.mjs$/)
-    assert.ok(env.CODEG_PI_ACP_BRIDGE_CONFIG)
+    assert.match(extensions[0], /mcp-bridge\.mjs$/)
+    assert.ok(env.PI_ACP_BRIDGE_CONFIG)
     return rest
   })
 }

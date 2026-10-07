@@ -1,6 +1,6 @@
-# codeg-pi-acp (ACP adapter for pi-coding-agent)
+# pi-acp (ACP adapter for pi-coding-agent)
 
-This repository implements an **Agent Client Protocol (ACP)** adapter for **pi** (`@earendil-works/pi-coding-agent`) without modifying pi. It is a fork of svkozak/pi-acp 0.0.34, maintained for codeg and published to npm as `codeg-pi-acp`. Keep upstream's layout and prettier config: files the fork never touched stay byte-identical to upstream, so upstream changes merge cleanly.
+This repository implements an **Agent Client Protocol (ACP)** adapter for **pi** (`@earendil-works/pi-coding-agent`) without modifying pi. It is a fork of svkozak/pi-acp 0.0.34, maintained for codeg and published to npm as `@spacering/pi-acp` (command `pi-acp`, the same as upstream's). Keep upstream's layout and prettier config: files the fork never touched stay byte-identical to upstream, so upstream changes merge cleanly.
 
 - ACP side: **JSON-RPC 2.0 over stdio** using `@agentclientprotocol/sdk` (TypeScript)
 - Pi side: spawn `pi --mode rpc` and communicate via **newline-delimited JSON** over stdio
@@ -25,7 +25,7 @@ Use `@agentclientprotocol/sdk`:
 ## Implementation constraints / decisions
 
 - Do **not** implement ACP client-side FS/terminal delegation in MVP. Pi already reads/writes and executes locally.
-- `mcpServers` reach pi's native MCP (pi 0.99+) through the pi extension in `src/pi-extension/codeg-bridge.ts`, which the adapter loads with `pi -e` (see `src/acp/mcp-bridge.ts`). The extension is built separately to `dist/codeg-bridge.mjs` and may import node built-ins only.
+- `mcpServers` reach pi's native MCP (pi 0.99+) through the pi extension in `src/pi-extension/mcp-bridge.ts`, which the adapter loads with `pi -e` (see `src/acp/mcp-bridge.ts`). The extension is built separately to `dist/mcp-bridge.mjs` and may import node built-ins only.
 - Stream pi's assistant text as ACP `agent_message_chunk` and its thinking as `agent_thought_chunk`.
 - Tool events: map pi tool execution events to ACP `tool_call` / `tool_call_update` (as text content).
 

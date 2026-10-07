@@ -10,7 +10,7 @@ import { PiRpcProcess, type PiExit } from '../../src/pi-rpc/process.js'
  * `onPrompt` (a JS statement) with `reply` in scope.
  */
 function fakePi(onPrompt: string): { command: string; cleanup: () => void } {
-  const dir = mkdtempSync(join(tmpdir(), 'codeg-pi-acp-exit-'))
+  const dir = mkdtempSync(join(tmpdir(), 'pi-acp-exit-'))
   const command = join(dir, 'pi')
   writeFileSync(
     command,
