@@ -52,18 +52,40 @@ Windows, macOS and Ubuntu, runs `npm publish`, and creates a GitHub Release.
 Publishing uses npm **trusted publishing** (OIDC). The repository holds no npm token. GitHub issues a short-lived
 credential at run time, npm accepts it for this repository's `release.yml`, and adds a provenance attestation.
 
-One-time setup:
+One-time setup. The package belongs to the npm account `spacering`, which is not the GitHub owner of this repository
+(`xintaofei`). That is fine: a trusted publisher is set per package and names the GitHub repository and workflow.
+You need npm 11.15 or newer (for `npm trust`) and 2FA on `spacering`. Run every command against the official
+registry, since a mirror in `~/.npmrc` cannot log in, publish or set trust. Keeping `spacering`'s login in a file of
+its own leaves your usual npm login untouched:
 
-1. **Publish the first version by hand.** npm only offers trusted-publisher settings for a package that already
-   exists. The package is `@spacering/pi-acp`, so log in to npm as `spacering` (with 2FA). Run
-   `npm run format:check && npm run smoke:packed`, then `npm publish`; `prepublishOnly` builds and runs the preflight,
-   typecheck, lint and tests before anything is uploaded. `publishConfig.access` is `public`: npm would otherwise
-   publish a scoped package as restricted.
-2. On npmjs.com, open `@spacering/pi-acp`'s **Settings → Trusted Publisher → GitHub Actions**. Set the user to
-   `xintaofei` (the GitHub owner of this repository), the repository to `pi-acp` and the workflow filename to
-   `release.yml`. Leave Environment empty.
-3. Under **Settings → Publishing access**, choose "Require two-factor authentication and disallow tokens". From then
-   on, unattended publishing goes only through `release.yml`.
+```bash
+export NPM_CONFIG_USERCONFIG=~/.npmrc-spacering NPM_CONFIG_REGISTRY=https://registry.npmjs.org/
+
+# 1. Log in as spacering. Open the printed URL in a private browser window: a browser
+#    already signed in to npmjs.com as another account would log that one in instead.
+npm login
+npm whoami                  # spacering
+
+# 2. Publish the first version by hand (npm only lets you add a trusted publisher to a
+#    package that exists). prepublishOnly builds and runs the preflight, typecheck, lint
+#    and tests first; publishConfig makes the scoped package public. No git tag for it.
+npm ci && npm run format:check && npm run smoke:packed
+npm publish
+
+# 3. Let this repository's release.yml publish (Settings → Trusted Publisher on npmjs.com).
+npm trust github @spacering/pi-acp --repo xintaofei/pi-acp --file release.yml --allow-publish
+
+# 4. Require 2FA and disallow tokens (Settings → Publishing access): from now on only
+#    release.yml, or you with 2FA, can publish.
+npm access set mfa=publish @spacering/pi-acp
+
+# 5. Drop the local login.
+npm logout && rm ~/.npmrc-spacering
+unset NPM_CONFIG_USERCONFIG NPM_CONFIG_REGISTRY
+```
+
+The next release (`npm version patch && git push --follow-tags`) is the first through `release.yml` and proves the
+setup.
 
 Points that cost time when they go wrong:
 
